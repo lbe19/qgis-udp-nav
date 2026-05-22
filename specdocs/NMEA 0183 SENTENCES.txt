@@ -1,0 +1,1702 @@
+NMEA 0183 SENTENCES
+This document describes the ASCII sentences used by the
+Kongsberg Simrad HiPAP/HPR systems. It is our intention
+that the sentences shall comply with the NMEA 0183 rules
+as specified in the note "Standard for interfacing Marine
+Electronic Devices NMEA 0183 Version 2.30".
+The printouts, communication ports and baud rate are
+selected in the APOS dialogs/HSC 400 menus. The format
+described for the printouts is also used for internal storage
+of files.
+Note! Both the APOS and the HSC 400 use the NMEA sentences. APOS
+supports more sentences than described in this document.
+The APOS On-line help contains an updated description of all
+sentences supported by the APOS.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Document revision
+Documentation
+department
+Hardware/Software
+design
+Project/Product
+Management
+Rev Date Sign Date Sign Date Sign
+A 16.10.95 -
+B 26.01.96 26.01.96 26.01.
+C 03.06.98 GM 03.06.98 HPJ 03.06.98 JEF
+D 10.10.01 GM 10.10.01 THG 10.10.01 JEF
+E 12.12.02 GM 12.12.02 THG 12.12.02 JEF
+Contents
+     - NMEA
+1 INTRODUCTION.......................................................................................................
+Abbreviations
+APOS
+Files on the HSC 400 Operator Station..............................................................................
+2 NMEA 0183 SENTENCES..........................................................................................
+SNS – Sensor values........................................................................................................
+Explanation of the fields in the sentence
+SSB - SSBL position......................................................................................................
+Explanation of the fields in the sentence
+X_coordinate, Y_coordinate, Co-ordinate system, Orientation........................................
+Explanation of the fields in the sentence
+Examples....................................................................................................................
+SSD - Dual HiPAP SSBL measurement
+The fields in the sentence.............................................................................................
+LBP - LBL Position.......................................................................................................
+Explanation of the fields in the sentence
+X_coordinate, Y_coordinate, Coordinate_system
+LBM - LBL Measurement..............................................................................................
+Explanation of the fields in the sentence
+LBL - LBL Location......................................................................................................
+LBR - LBL Range
+GPS - Global Positioning System....................................................................................
+Explanation of the fields in the sentence
+DR Draft
+3 LBL GEOGRAPHICAL CALIBRATION SENTENCES.........................................
+LBG - LBL Geographical calibration
+Explanation of the fields in the sentence
+LGQ - LBL Geographical
+Explanation of the fields in the sentence
+LBO - LBL Origin.........................................................................................................
+Explanation of the fields in the sentence
+LOQ - LBL Origin Quality.............................................................................................
+Explanation of the fields in the sentence
+4 LBL RUN TIME CALIBRATION SENTENCES
+RCT - Run Time Calibration Tx
+Explanation of the fields in the sentence
+RCM - Run Time Calibration Measurements
+Explanation of the fields in the sentence
+5 EXTERNAL CONTROL AND ACCESS SENTENCES Kongsberg Simrad HiPAP/HPR 400 System
+RCP - Remote Control Positioning..................................................................................
+SVT - Sound Velocity....................................................................................................
+6 TRANSDUCER ALIGNMENT SENTENCES..........................................................
+Sentences with the measurements
+Sentences with the results...............................................................................................
+POP - Position Pair for Transducer alignment..................................................................
+Explanation of the fields in the sentence
+PPQ - Position Pair quality.............................................................................................
+Explanation of the fields in the sentence
+TDP - Transducer Parameters for Transducer alignment...................................................
+Explanation of the fields in the sentence
+GPA - GPS antenna offset Parameters for Transducer alignment.......................................
+Explanation of the fields in the sentence
+TDQ - Transducer Parameters quality.............................................................................
+TPP - Transponder Position for Transducer alignment......................................................
+Explanation of the fields in the sentence
+TPQ - Transponder Quality............................................................................................
+Explanation of the fields in the sentence
+VEP - Vessel Position for Transducer alignment..............................................................
+Explanation of the fields in the sentence
+7 NMEA 0183 STANDARD SENTENCES...................................................................
+GLL - Geographic position Latitude Longitude................................................................
+Mode indicator............................................................................................................
+NMEA 0183
+Document History
+(The information on this page is for internal use)
+Rev .A Original issue.
+
+Rev .B New software version 2.03 implemented where applicable. Refer to footnotes in the
+text for further information. The sentences implemented in the previous SW version
+are still compatible.
+
+Rev .C Minor changes to the layout.
+A new sente nce, PS IMSNS, fo r sensor readings is added.
+
+The field definitions in the tables are corrected to be as described in version 2.20 of
+the NMEA 0183 standard. This is a change in the document, and not in the contents
+of the sentences sent from the HiPAP/HPR system. The document is made common
+for both the APOS and the HSC 400 operator stations.
+Rev .D New software version 3.5.2 implemented where applicable. General upgrading.
+Minor corrections in the text.
+
+Rev .E Implemented new telegram DR. Changed time description in GLL, VEP, SSB, SSD,
+SNS, LBM, GPS, LBP, LBR. Minor corrections in TDP and TDQ.
+Minor corrections in the text. Ref. EM 850-160045E.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+1 INTRODUCTION.......................................................................................................
+This is technical documentation that may be changed. Please contact
+Kongsberg Simrad before implementing the reception of sentences to
+assure that the note matches the SW version in the actual system to be
+interfaced. These html files for the APOS help system describe the
+NMEA sentences for the APOS. They are extended with new
+sentences as they are implemented in APOS. HSC 400 was the
+operator station used for the HiPAP/HPR systems before the APOS
+was released. The sentences implemented in HSC 400 are described in
+the note 160045/C in the operator manual.
+Abbreviations
+HPR Hydroacoustic Positioning Reference system.
+HiPAP High Precision Acoustic Positioning
+SSBL Super Short Base Line
+LBL Lo ng Base Li ne
+HSC 400 HPR 400 System Controller, the “old” Operator Station
+APOS Acoustic Positioning Operator Station.
+It is the Kongsberg Simrad Operator Station for the HiPAP
+and HPR 400 transceivers.
+rms root mean square
+TP TransPonder
+KS specific telegrams are made for standard positioning use:
+SNS Sensor values
+SSB SSBL position
+SSD Dual HiPAP SSBL measurement
+LBP LBL Position
+LBM LBL Measurement
+LBR LBL range
+GPS Global Positioning System
+DR Draft
+KS specific telegrams are made for external control and access:
+RCP Remote Control Positioning
+SVT Sound Velocity
+NMEA 0183
+APOS
+APOS is the Operator Station with the Windows Man Machine
+Interface. It replaces the older HSC 400, which will not be updated
+wit h new i nfo rmatio n.
+Note! All NMEA sentences may not be implemented in the APOS.
+
+HPR 400 and HiPAP are two different types of transceivers. They
+may both be connected to either a HSC 400 or to an APOS Operator
+Station. In either case, the NMEA sentences are delivered by the
+Operator Station, and the format is independent of the physical units
+involved.
+Files on the HSC 400 Operator Station..............................................................................
+The NMEA sentences may be stored on files. When reading a file, the
+sentences on the file are interpreted regardless of the file name. When
+writing sentences to a file, the file name reflects the contents of the
+sentences. The file name convention consists of the following rules:
+The files are stored on either the root of the diskette in A: or on the
+directory \HSC400\Data on the default drive. The default drive is the drive
+from which the HSC 400 program booted. That is normally the hard disk
+C:.
+The file names are PSIMxxx, in which xxx is an index between 0 and 255.
+The index 000 is the one used for default parameters at power on.
+The extension consists of three characters, which are the three last
+characters in the NMEA address of the sentences contained on the file.
+It is possible to route printer output to files. The file name is as explained in
+The extension is PRN.
+Examples of file names are:
+The file C:\HSC400\DATA\PSIM000.LBR contains the seabed ranges
+between TPs. These ranges are the ones used by the HSC 400 at power on.
+The file A:\PSIM100.LBL contains locations saved on a diskette as data
+set number 100.
+The file A:\PSIM002.PRN contains printout routed to a file.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+2 NMEA 0183 SENTENCES..........................................................................................
+The sentence format is set up in tables with one line for each field.
+The programs reading the sentences must be prepared to read any
+number of characters in each field as long as they comply with the
+NMEA standard.
+The NMEA standard allows new data fields to be added after the last
+data field but before the checksum delimiter character "*". It has been
+done with the $--GLL sentence, which has got a Mode indicator field
+added after the Status field. Kongsberg Simrad has not added new data
+fields to the $PSIM sentences described in this on-line manual, and we
+intend not to do so with the sentences sent on serial lines and Ethernet
+to customer computers. We may, however, do it in the future with the
+$PSIM sentences defined for internal use.
+The address field starts with PSIM, which is the proprietary code for
+Simrad Inc. Then three characters follows, this is the product
+identification within Kongsberg Simrad. In this note there is one
+chapter for each sentence. The chapter name starts with the three-
+characters product identification, and the list of contents may therefore
+be used as a list of the sentences.
+The NMEA sentences may be stored on files. When reading a file, the
+sentences on the file are interpreted regardless of the file name. When
+writing sentences to a file, the file name should reflect the contents of
+the sentences.
+The Geographical coordinates are always in the datum selected as the
+presentation datum and in the UTM zone selected. These parameters
+must be set correctly on the APOS.
+NMEA 0183
+SNS – Sensor values........................................................................................................
+The PSIMSNS sentence contains the sensor values read from the
+VRU, Gyro or attitude sensor. It is sent from the system when one of
+the following two events occur:
+The system has measured either a SSBL position or a LBL position. The
+sensor values in the sentence are the values read when the acoustic reply is
+received. The sensors are read by the transceiver doing the acoustic
+measurement. The SNS sentence is sent just before the sentence containing
+the SSBL or LBL position.
+No acoustic position is measured by the system for some time (ca 1 seconds
+for a HiPAP system and ca 5 seconds for a HPR400 system). Then the
+sensors are read periodically by the transceiver defined by the operator as
+the sensor source for the vessel.
+If one or more of the sensor values are missing, the associated field(s)
+in the SNS sentence are empty. When the sentence is generated by an
+HPR 400 system, the Heave field is normally empty.
+The format of the PSIMSNS sentence is:
+Field Name Explanation
+$ Start_character
+PSIMSNS Address Propr. Simrad address for sensor values.
+,hhmmss.ss Clock The clock in hours minutes and seconds.
+The decimal fraction is optional.
+,c--c Pos_item The position item to which the sentence is
+associated.
+,xx__ Transceiver Transceiver numbe r.
+,xx__ Transducer Transducer number.
+,x.x Roll The roll angle in degrees.
+,x.x Pitch The pitch angle in degrees.
+,x.x Heave The heave in metres.
+,x.x Heading The heading in degrees. A value between 0 and
+360.
+,x tag Optional Tag field. It is used to + the SNS
+sentence to other sentence(s).
+,x Parameters Describe parameters used in calculation.
+,x.x Time age Time since the position was valid. Unit seconds.
+, Spare1 Empty field.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Field Name Explanation
+,axx Master Slave Master Slave info plus APOS Identification
+nu mber.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+Pos_item The position item is either a transponder code or a LBL type.
+When the SNS sentence is associated with a SSBL position, the
+Pos_item field contains the Tp_code as in the SSB sentence.
+When the SNS sentence is associated with a LBL position, the
+Pos_item field contains the Type as in the LBP sentence.
+When the SNS sentence is not associated with any position
+measured by the system, the Pos_item field is empty.
+Transceiver It contains the number of the transceiver on which the sensor
+readings are performed.
+The transceiver numbering starts at 1.
+Transducer When the SNS sentence is associated with an acoustic position, the
+Transducer field contains the number (1 to 4) of the transducer doing
+the measurement. Otherwise the Transducer field is empty.
+Roll, Pitch Unit degrees. The angles are around zero, that is, both positive and
+negative values are allowed.
+Positive roll means that the starboard side is down.
+Positive pitch means that the bow is up.
+Heave Unit meters. Normally empty.
+Heading Unit degrees 0 to 360. It is the value of the gyro at measurement
+time.
+Tag A decimal digit, which is used to link this sentence to other sentence,
+otherwise the field is empty. First used in connection with PSIMPOP
+sentence.
+Parameters A hexadecimal digit with bit coding used to describe parameters
+used in calculation for "Pos_item". All 0 means no relevant
+positioning.
+Bit 0-1 Type of positioning. 0 means no positioning, 1 means
+SSBL, 2 means LBL, 3 means special positioning.
+Bit 2-3 Deskew. 0 means deskew OFF, 1 means deskew Vessel, 2
+means deskew Transponder.
+Bit 4 Fixed/Mobile flag. 0 means Fixed, 1 means Mobile (SSBL
+positioning choice).
+NMEA 0183
+Bit 5 Time in UTC. 1 = True.
+Bit 6 Sound Velocity profile used. 1 = True.
+Bit 7 Time Synced. 1 = True tells that one of the APOS, operator
+stations are synced against an external clock.
+Time Age Time from valid position time (i.e. time in the sentence) to
+ge neratio n of this NMEA sente nce. Uni t seconds.
+Master Slave This field describe if the operator station is Master or it is Slave, and
+it also give an identification of the operator station. The first
+character is either 'M' for Master or 'S' for Slave. Then a digit is
+following, where 121 indicates OS1, 122 indicates OS2 etc. The
+reason to the information is for redundancy, you may set all operator
+stations to send information to a specific receiver. The receiver will
+then get the measurements even if one of the operator stations go
+down. With this information it is possible to avoid double use of the
+same measurements.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+SSB - SSBL position......................................................................................................
+The PSIMSSB sentence contains the position of a SSBL TP. It is sent
+after each HiPAP/SSBL measurement when so requested at the
+APOS. The operator may define various parameters for the printout.
+The format of the PSIMSSB sentence is:
+Field Name Explanation
+$ Start_character
+PSIMSSB Address Propr. Simrad address for SSBL sentence.
+,hhmmss.ss Time Empty or Time of reception.
+,cc__ Tp_code Examples: B01, B33, B47.
+,A Status A for OK and V for not OK.
+,cc__ Error_code Empty or a three-character error code.
+,a Coordinate_system C for Cartesian, P for polar,
+U for UTM coordinates.
+,a Orientation H for vessel head up, N for north,
+E for East.
+,a SW_ filter M means Measured, F Filtered,
+P Predicted.
+,x.x X_coordinate See separate explanation below.
+,x.x Y_coordinate See separate explanation below.
+,x.x Depth Depth in metres.
+,x.x Expected_accuracy The expected accuracy of the position.
+,a Additional_info N for none, C compass, I inclinometer, D
+depth, T time.
+,x.x First_add_value Empty, Tp compass or Tp x inclination.
+,x.x Second_add_value Empty or Tp y inclination.
+*hh Checksum Empty or checksum.
+CRLF Termination
+NMEA 0183
+Explanation of the fields in the sentence
+Address field
+It is PSIMSSB telling that it is a proprietary Kongsberg Simrad
+sentence containing a SSBL measurement.
+Tp_code The Tp_code field contains the three-character ASCII code of the
+transponder for which the sentence contains a measurement. The
+characters are the same as the ones used on the Operator Station and
+in the operator manual.
+Status The status field is "A" when position is OK, "and V" when the
+position is not OK or missing. The Error_code field contains in both
+case further description.
+Erro r Code The error code field contains a three-character error code. The
+possible codes are as shown in the table below:
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Code Explanation Implication Status
+Field
+NRy No reply is received. No position is calculated V
+AmX Ambiguity error in the X direction. No position is calculated. V
+AmY Ambiguity error in the Y direction. No position is calculated. V
+Rej The position is measured OK, but rejected
+by the SW filter in either the transceiver
+or in the HSC 400.
+A
+Mi2 The second pulse of the Tp reply is
+missing.
+Both Additional_info fields
+are empty. Status Field is V
+if sensor type is Depth.
+A/V
+Mi3 The third pulse of the Tp reply is missing. Additional_info field nr 2 is
+empty.
+A
+Pre No position is measured. The position is
+predicted by the Kalman filter in the HSC
+400.
+A
+VRU The VRU connected to the system has
+reported error.
+Position not calculated with
+correct roll&pitch.
+V
+GYR The gyro connected to the system has
+reported error.
+Position not calculated with
+correct heading.
+V
+ATT Attitude sensor (VRU or Gyro) connected
+to the system has reported error.
+Position not calculated with
+correct heading, roll and
+pitch.
+V
+ExD External depth used in calculation of
+position.
+Position OK. A
+ExM External depth wanted but not received. Position are calculated
+without locked depth.
+V
+??? The system has reported an unknown
+error.
+V
+When no position is calculated, the position fields X_coordinate,
+Y_coordinate and Depth are all empty. When the Status field is A, the
+measured position is OK but the Error_code field may still describe
+error in the measurement.
+X_coordinate, Y_coordinate, Co-ordinate system, Orientation........................................
+The contents of the X_coordinate and the Y coordinate fields are
+controlled by the settings in the APOS Configure dialog. The
+Coordinate_system and Orientation fields should be used to decode
+the X_ and Y_coordinate fields as shown in the table.
+NMEA 0183
+APOS
+settings
+PSIMSSB fields PSIMSSB coordinates of transponder
+position
+CO-ORD Coordinate
+system
+
+Orientation X_coordinate Y_coordinate
+Polar P H Horizontal range Bearing in degrees
+
+Cartesian X/Y C H Starboard Forwards
+
+Cartesian N/E C N North East
+
+Cartesian E/N C E East North
+
+UTM N/E U N Northings Eastings
+
+UTM E/N U E Eastings Northings
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+The Polar and Cartesian X/Y coordinates are the position of the
+transponder relative to the vessel. They are in metres, except the
+Bearing, which is an angle between 0 to 360 degrees. The Eastings
+and the Northings are the UTM coordinates of the transponder.
+Expected_accuracy The expected accuracy of the position is based on the covariance
+data calculated for each position. It is equal to the statistical sum of
+the Major and Minor semiaxes of the error ellipse displayed around
+the position.
+Additional_info Either used for sensor values or for travel time from transponder to
+transducer. See below for actual values.
+Additional_info First value Second value Description
+C Bearing Bearing in degrees.
+I X inclination Y inclination Inclination values in degrees,
+also used for diffincli natio n.
+D Depth Depth [m]
+T Time Time from transponder to transducer.
+Unit seconds.
+N Empty fields, used when transponder in
+beacon mode.
+Examples....................................................................................................................
+Different Tp codes
+B01, B55, B12 and B87 are active.
+
+The Cartesian coordinates are:
+B01 in (Fwd 50 m, Stb 100 m, Depth 48.5 m). Std_dev is 0.0 m.
+B55 in (Fwd 50 m, Stb –100 m, Depth 25.8 m). Std_dev is 0.0 m.
+B12 in (Fwd –50 m, Stb –100 m, Depth 0.9 m). Std_dev is 2.70 m.
+B87 in (Fwd –50 m, Stb 100 m, Depth 9999.99 m). Std_dev is 2.70 m.
+
+The NMEA sentences are:
+
+$PSIMSSB,,B01,A,,P,H,M,111.80,63.43,48.50,0.00,N,,*5E
+
+$PSIMSSB,,B55,A,,P,H,M,111.80,296.57,25.80,0.00,N,,*
+
+$PSIMSSB,,B12,A,,P,H,M,111.80,243.43,0.90,2.70,N,,*
+
+$PSIMSSB,,B87,A,,P,H,M,111.80,116.57,9999.99,2.70,N,,*6A
+
+Different statuses
+NMEA 0183
+B36 is active with the following statuses:
+ok
+No Reply NRy
+Ambiguity x AmX
+Ambiguity y AmY
+Reply rejected Rej
+Compass tp with missing 2. Pulse Mi
+Inclinometer tp with missing 3. Pulse Mi
+The NMEA sentences are:
+
+$PSIMSSB,,B36,A,,P,H,M,100.00,0.00,200.00,2.70,N,,*5E
+
+$PSIMSSB,,B36,V,NRy,P,H,M,,,,2.70,N,,*
+
+$PSIMSSB,,B36,V,AmX,P,H,M,,,,2.70,N,,*
+
+$PSIMSSB,,B36,V,AmY,P,H,M,,,,2.70,N,,*
+
+$PSIMSSB,,B36,V,Rej,P,H,M,100.00,0.00,200.00,2.70,N,,*
+
+$PSIMSSB,,B36,V,Mi2,P,H,M,100.00,0.00,200.00,2.70,N,,*5F
+
+$PSIMSSB,,B36,V,Mi3,P,H,M,100.00,0.00,200.00,2.70,N,,*5E
+
+Inclinometer Tp with ok reply
+B24 is active as inclinometer transponder with great values. The cartesian position:
+
+(8765.43 m, -5678,34 m, 2345.78 m) is used. The inclinometer angles
+(-128,45, -135.98) degrees are used. The Std_dev is also -128.45 m.
+The NMEA sentence is:
+$PSIMSSB,,B24,A,,P,H,M,10443.96,122.94,2345.78,-128.45,I,-
+128.45,-135.98*
+Compass Tp with ok reply
+B82 is active as a compass tp. The Cartesian position (0, -200 m, 23
+m) is used. The compass angle 200.98 degrees is used. The Std_dev is
+also 200.98 m.
+The NMEA sentence is:
+$PSIMSSB,,B82,A,,P,H,M,200.00,180.00,23.00,200.98,C,200.98,*7E
+Kongsberg Simrad HiPAP/HPR 400 System
+
+SSD - Dual HiPAP SSBL measurement
+The PSIMSSD sentence contains the measured position of a SSBL TP
+done on either Master HiPAP or Slave HiPAP. It is sent two times for
+each measurement, one for the Master HiPAP and one for the Slave
+HiPAP. The PSIMSSB sentence is sent in addition, containing the
+combined position of the master and the slave. Following will be the
+normal sequence of telegrams for a Dual HiPAP position: PSIMSSD
+(Master HiPAP), PSIMSSD (Slave HiPAP), PSIMSNS, PSIMSSB.
+The format of the PSIMSSD sentence is:
+Field Name Explanation
+$ Start_character
+PSIMSSD Address The address for the dual HiPAP/SSBL
+sentence.
+,hhmmss.ss Time The real time of the measurement. Given as
+hour, minutes and seconds. The time format
+is either local time or UTC time, depending
+on the selection in the menu.
+,cc__ Tp_code Examples: B01, B33, B47.
+,A Status A for OK and V for not OK.
+,cc__ Error_code Empty or a three-character error code.
+,M Master M = Master, S = Slave.
+,x.x North coordinate Local North coordinate in meter.
+,x.x East coordinate Local East coordinate in meter.
+,x.x Depth Depth in meters.
+,x.x Expected_accuracy The expected accuracy of the position.
+,x.x Roll The roll angle in degrees at measurement
+time.
+,x.x Pitch The pitch angle in degrees at measurement
+time.
+,x.x Heave The heave in meters.
+,x.x Heading The heading in degrees at measurement time.
+A value between 0 and 360.
+, Empty Reserved for future use.
+, Empty Reserved for future use.
+*hh Checksum Empty or checksum.
+CRLF Termination
+NMEA 0183
+The fields in the sentence.............................................................................................
+Add ress
+The Address field is PSIMSSD telling that it is a proprietary SIMRAD
+sentence containing a SSBL measurement done on a Dual HiPAP
+system.
+Tp_code The Tp_code field contains the three-character ASCII code of the
+transponder for which the sentence contains a measurement. The
+characters are the same as the ones used on the Operator Station and
+in the operator manual.
+Status When the Status field is A, the measured position is OK and the
+Error_code field is empty.
+The status field is V when the measurement is not OK. Then the
+Error_code field contains a three-character error code. When no
+position is calculated, the position fields North, East and Depth are
+all empty.
+The possible codes are as set up as follows:
+Code Explanation Implication
+
+NRy No reply is received. No position is calculated.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Master
+Dual HiPAP measurement is done by two HiPAPs. The Master sends
+the interrogation pulse to the transponder, the Master then measure the
+range between the Master transducer and the transponder both ways.
+The Slave will measure the range from the Master transducer to the
+transponder and from the transponder to the Slave transducer. Both
+measurements are compensated to the vessels CG (Center of Gravity)
+before output in this sentence.
+Expected_accuracy The expected accuracy of the position is based on the covariance
+data calculated for each position. It is equal to the statistical sum of
+the Major and Minor semiaxies of the error ellipse displayed around
+the position.
+Roll, Pitch Unit degrees. The angles are around zero, that is, both positive and
+negative values are allowed. Positive roll means that the starboard
+side is down. Positive pitch means that the bow is up.
+Heave Unit meters. Normally empty.
+Heading Unit degrees 0 to 360. It is the value of the gyro at measurement
+time.
+NMEA 0183
+LBP - LBL Position.......................................................................................................
+The PSIMLBP sentence contains a position measured by LBL. It is
+sent from the APOS after each LBL position calculation when so
+requested in the Configure dialog. The operator may define various
+parameters for the printout.
+The format of the PSIMLBP sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBP Address The address for LBL Position.
+,hhmmss.ss Time The real time of the measurement. Given as
+hour, minutes and seconds. The time format
+is either local time or UTC time, depending
+on the selection in the menu.
+,c--c Tp_array The Tp array for which the origin is valid.
+,a_ Type The type of the item positioned.
+,A Status The status of the position. A is OK.
+,a_ Coordinates See separate description below.
+,x.x X_coordinate See separate description below.
+,x.x Y_coordinate See separate description below.
+,x.x Depth The depth of the position.
+,x.x Major The major axis of the error ellipse.
+,x.x Minor The minor axis of the error ellipse.
+,x.x Direction The direction of the major axis in the error
+ellipse.
+,x.x Res_rms The rms value of the normalised residuals.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+Type
+The Type field is Ve when the position is for the vessel. It is R1 to R4
+for ROV 1 to ROV 4. It is T1 to T4 for TPs being positioned in LBL
+mode using the TP range feature of the TP.
+Status
+The Status field is A when the measurements are OK. The possible
+statuses are as shown below:
+AOK
+RES The residuals of the measurement are too large.
+NVC The position calculation does not converge in the vertical
+direction. It may happen when positioning items in the
+same depth as the seabed TPs.
+NOC The position calculation does not converge in the
+hori zo ntal directio n.
+FER Too few replies are received to calculate a position.
+CER Computational error when calculating the position.
+NGl No Geographic position, i.e. Origin defined in geographic
+coordinates.
+??? Another error condition.
+X_coordinate, Y_coordinate, Coordinate_system
+The contents of the X_coordinate and the Y_coordinate fields are
+controlled by the settings in the Configure dialog.
+The Coordinate_system field should be used to decode the X_ and
+Y_coordinate fields as shown in the table below.
+APOS
+Configure Setting
+Coordinate
+system
+X_coordinate Y_coordinate
+Cartesian N/E C North East
+Cartesian E/N L East North
+UTM N/E U Northings Eastings
+UTM E/N E Eastings Northings
+The Cartesian coordinates are the position of the vessel or ROV in
+meters relative to the origin of the TP array. The Eastings and
+Northings are the UTM coordinates of the vessel or the ROV.
+NMEA 0183
+Res_rms The field contains the root mean square of the normalised residuals
+of the measurements. A normalised residual is the residual divided
+with the expected accuracy of the measurement. An rms value less
+than 1 indicates that the measurements tend to be more accurate than
+expected.
+When the few measurements (less than 6) contribute in the
+calculation, the residuals tend to be lower than when many
+measurements contribute. Then the rms value of the residuals will be
+lower, too. When only 3 measurements contribute, the residuals will
+be zero. The error ellipse, however, will be greater when few
+measurements contribute than when many do. Therefore both the
+rms of the residuals, and the error ellipse, must be regarded when
+deciding the quality of the position.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+LBM - LBL Measurement..............................................................................................
+The PSIMLBM sentence contains roll, pitch, course, depth and range
+measurements as the basis for position calculation. The sentence is
+sent after each LBL measurement when so requested in the APOS
+Configure dialog. The operator may define various parameters for the
+printout in that menu.
+The format of the PSIMLBM sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBM Address The address for LBL Measurement.
+,hhmmss.ss Time The real time of the measurement. Given as hour,
+minutes and seconds. The time format is either local
+time or UTC time, depending on the selection in the
+me nu.
+,c--c Tp_array The Tp array in which the measurements are done.
+,xx Td_id The identification of the TD on which the reply is
+received.
+,x.x Roll The roll angle when receiving the measurements.
+,x.x Pitch The pitch angle when receiving the measurements.
+,x.x Course The course when receiving the measurements.
+,x.x Depth Fixed depth or depth received from a depth sensor.
+Empty when no depth is available.
+,x.x Range_1 Range measured to the first location in array. Empty
+when no range measured.
+,x.x Range_2 Range to loc 2 or empty.
+,x.x Range_3 Range to loc 3 or empty.
+,x.x Range_4 Range to loc 4 or empty.
+,x.x Range_5 Range to loc 5 or empty.
+,x.x Range_6 Range to loc 6 or empty.
+,x.x Range_7 Range to loc 7 or empty.
+,x.x Range_8 Range to loc 8 or empty.
+,a Unit M when the ranges are in meters.
+S when the ranges are in seconds.
+*hh Checksum Empty or checksum.
+CRLF Termination
+NMEA 0183
+Explanation of the fields in the sentence
+Td_id The Td_id defines the TD in use for the reception of the replies. 0 to
+3 are used for TP range positioning tag 1 to 4. 8 to 11 are used for
+the TDs connected to Transceiver 1, 12 to 15 for the TDs connected
+to Transceiver 2, and so on. The TD on the vessel has an offset to the
+CG to which all positions refer. The Roll, Pitch and course values in
+the sentence are used to transfer the TD offset vector to geographical
+coordinates before being added to the position of the TDs.
+Range_x The ranges to the seabed TPs 1 to 8 are in either meters or seconds.
+The field is empty when no range is measured. The unit Meter or
+Second is given by the Unit field. When the ranges are in seconds,
+they refer to the one way propagation time of the sound. When in
+meters, they are compensated for the sound velocity profile used.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+LBL - LBL Location......................................................................................................
+The PSIMLBL sentence contains coordinates of the LBL locations on
+the seabed. It is used both for input to and output. The sentences may
+be on a file for input to either the initial or calibrated coordinates of
+the locations. The sentences for the locations are sent from the APOS
+on the operator’s request.
+The format of the PSIMLBL sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBL Address The address for LBL Location.
+,aa_ Type C when calibrated, I when initial coordinates.
+,aa_ Coordinates L when the coordinates are in local coordinates.
+U when the coordinates are in UTM.
+O when the coordinates are in UTM and define the
+UTM centre to be used.
+,x Locatio n_ no Locatio n nu mber 1 to 99.
+,x Serial_no The serial number of the TP at the location.
+,x.x North North coordinate.
+,x.x East East coordinate.
+,x.x Depth Depth.
+,x.x Major The Major axis of the one sigma error ellipse.
+,x.x Minor The Minor axis of the one sigma error ellipse.
+,x.x Direction The direction of the major axis.
+,x.x Depth_std_dev The one sigma standard deviation in depth.
+*hh Checksum Empty or checksum.
+CRLF Termination
+The location coordinates may be entered in either UTM coordinates or
+in local coordinates.
+When the locations are entered in UTM coordinates a UTM centre
+must have been specified beforehand. That is done either in the menu
+or in the file containing the LBL locations. Then the Coordinates field
+is O, causing the North and East to be interpreted as UTM coordinates
+and used as the UTM centre for the locations. The other fields may be
+empty when the Coordinates field is O, but they need not be. In the
+latter case the UTM centre is in the location. In the printouts, the
+UTM centre is printed with the other fields empty.
+NMEA 0183
+The distance from the UTM centre to the locations should be less than
+15 km to avoid calculation noise when converting between global and
+local coordinates.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+LBR - LBL Range
+The PSIMLBR sentence contains information about a range measured
+between two locations on the seabed for calibration purpose. It is used
+both output from the APOS.
+The format of the PSIMLBR sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBR Address The address for LBL Range.
+,yymmddhhmm Date_time Date and time of measurement.
+,A Status A when in use, V when excluded, S when sum element.
+,c--c Tp_array The Tp array in which the measurement is done.
+,x Master Master Location.
+,x Slave Slave Location.
+,x.x Propagation_time The one way propagation time [s] of the sound.
+,x.x Range The range [m].
+,x No_measures The number of measurements.
+,x.x Std_dev The standard deviation of the range.
+,x.x Residual The residual of the range.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Date_time The Date_time field contains two digits each for the year, month,
+day, hour and minute when the measurement was performed. It is
+empty when there is no information about when the measurement
+was done.
+An example of a legal value is 9411071309, meaning 13:09 at 11
+November 1994.
+Status The Status field is A when the sentence contains a measurement
+used in the calibration and V when it contains a measurement
+excluded from the calibration. It is S when the sentence is a
+statistical sum of measured ranges. Each baselength may be
+measured many times in the same direction. Before used in the
+calibration calculation, these measurements are combined into one
+mean value and one standard deviation. Such sentences have the
+status S. They have an empty Propagation_time field.
+Tp_arra y The Tp array tells in which array the measurement is performed. The
+NMEA 0183
+field may be empty when the information is irrelevant.
+Propagation_time The Propagation field may be empty. Then the range is treated as
+fixed, and it may not be recalculated with a new sound velocity
+profile later. When the range is measured by the HPR system, the
+propagation field contains the time measured.
+Residual The residual field is empty when no calibration calculation is
+performed with the range measured. Otherwise it contains the
+residual last calculated. The field may be empty.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+GPS - Global Positioning System....................................................................................
+The HPR system may receive __GGA and __GLL NMEA 0183
+position sentences from a GPS receiver. They are in the datum defined
+as the input datum on the APOS, and they normally give the position
+of the GPS antenna. This position may be transmitted as a PSIMGPS
+sentence. Then the position is in the Presentation datum defined on the
+APOS, and it is the position of the vessel reference point, i.e. the
+antenna offset is taken into account.
+The values transmitted in the PSIMGPS sentence are the same as
+those displayed on the APOS screen when so requested.
+The format of the PSIMGPS sentence is:
+Field Name Explanation
+$ Start_character
+PSIMGPS Address The address for GPS position
+,yymmddhhmmss.ss Date Time The date and time received in the sentence from the
+GPS receiver. If time on whole seconds, the parts of
+seconds are not included. The time format is either
+local time or UTC time, depending on the selection
+in the menu.
+,a_ Utm_Geo The field is U if the position is in UTM coordinates
+and it is G if the position is in geographical
+coordinates.
+,x.x North The North coordi nate.
+,a_ N_S N telling that previous field is North and
+S telling it is South.
+,x.x East The East coordinate.
+,E E_W E telling that previous field is East and
+W telling it is west.
+*hh Checksum Checksum.
+CRLF Termination
+NMEA 0183
+Explanation of the fields in the sentence
+Utm_Geo When the Utm_Geo field is equal to U, the North and East fields
+contain the position in meters with one digit after the point. The N_S
+field is always N and the E_W field is always E for UTM
+coordinates. When the Utm_Geo field is equal to G, the North field
+is the latitude and the East field is the longitude. The two first digits
+of the latitude and the three first digits of the longitude are the
+degrees, the next two digits are the minutes. Then follows a point
+and four digits telling the decimal fraction of minutes.
+DR Draft
+The PSIMDR sentence contains information about the draft used by
+APOS, which may be used in calculation of SSBL positions with
+locked depth and in LBL/MuLBL calculation.
+The draft is the depth of the keel referred to the surface. Before the
+draft will be used by APOS we need an input of the distance from
+reference point (normally CG - Center of Gravity) to keel.
+The format of the PSIMDR sentence is:
+Field Name Explanation
+
+$ Start_character
+
+PSIMDR Address The address.
+
+,x.x Bow draft Bow draft with unit meters.
+
+,A Status bow
+draft
+
+A when draft is OK, V when not valid.
+,x.x Aft draft Aft draft with unit meters.
+
+,A Status aft draft A when draft is OK, V when not valid.
+
+*hh Checksum Empty or checksum.
+
+CRLF Termination
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+3 LBL GEOGRAPHICAL CALIBRATION SENTENCES.........................................
+The LBL geographical calibration is the process of deciding the
+latitude and longitude of the origin of a LBL array, and the rotation of
+the local co-ordinate system relative to the geographical north. It is
+explained in more detail in the APOS help.
+This section contains the NMEA sentences describing both the result
+of the LBL geographical calibration and the measurements that are the
+basis for the calculation.
+NMEA 0183
+LBG - LBL Geographical calibration
+The PSIMLBG sentence contains information about a position pair
+used for Geographical Calibration. The PSIMLBG sentences are sent
+from the APOS on the operator’s request.
+The format of the PSIMLBG sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBG Address Address for LBL Geographical calibration.
+,yymmddhhmm Date_time Time of measurement.
+,A Status A when position pair is in use, V when excluded
+,a_ UTM_or_rad U for UTM coordinates, r for radians.
+,c--c Tp_array The Tp array for which the origin is valid.
+,x.x Geographical_north The Geographical North coordinate of GPS position.
+,x.x Geographical_east The Geographical East coordinate of GPS position.
+,x.x LBL_north The Local North coordinate of LBL measure.
+,x.x LBL_east The Local East coordinate of LBL measure
+,x.x Dist_residual The distance residual.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+Geographical_north,
+Geographical_east
+These fields contain the position of the vessel read from the dGPS
+receiver. The position is offset to the reference point of the vessel.
+LBL_north, LBL_east These fields contain the position of the vessel calculated based on
+the ranges to the seabed TPs. The position is offset to the reference
+point of the vessel. These coordinates are in the local coordinate
+system.
+Dist_residual The Dist_residual field is updated when a geographical calibration is
+performed. It contains the horizontal difference in meters between
+the local LBL position and the geographical position, transformed to
+local coordinates.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+LGQ - LBL Geographical
+Quality
+The PSIMLGQ sentence contains information about the QA data of a
+position pair used for Geographical Calibration. The QA data are the
+elements in the Covariance matrixes of the Geographical position and
+of the local position. The PSIMLGQ sentences always follow the
+PSIMLBG sentences when transmitted from the APOS system. For
+each position pair there is one PSIMLBG sentence and one PSIMLGQ
+sentence.
+The format of the PSIMLGQ sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLGQ Address Address for LBL Geographical Calibration QA.
+,yymmddhhmm Date_time Time of measurement.
+,x.x Geographical_north_var The variance in the geographical north direction
+of the geographical position.
+,x.x Geographical_east_var The variance in the geographical east direction of
+the geographical position.
+,x.x Geographical_covar The covariance between north and east of the
+geographical position.
+,x.x LBL_north_var The variance in the local north direction of the
+LBL position.
+,x.x LBL_east_var The variance in the local east direction of the
+LBL position.
+,x.x LBL_covar The covariance between north and east of the
+LBL position.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+The geographical variances
+These fields contain the variance of the dGPS position in the north and
+east direction, and the co-variance between north and east. The
+variance is the square of the expected 1-sigma accuracy. The values
+are calculated based on the input from the dGPS receiver.
+NMEA 0183
+The LBL variances
+
+These fields contain the variance of the LBL position in the north and
+east direction, and the co-variance between north and east. The
+variance is the square of the expected 1-sigma accuracy, which
+correspond to the error ellipse drawn on the APOS display.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+LBO - LBL Origin.........................................................................................................
+The PSIMLBO sentence contains information about the origin used
+for a Tp array. It is sent on the operator’s request.
+The format of the PSIMLBO sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLBO Address The address for LBL Origin.
+,c--c Tp_array The Tp array for which the origin is valid.
+,a_ UTM_or_rad U for UTM coordinates, r for radians.
+,x.x Origin_north The North coordinate or the latitude of the origin.
+,x.x Origin_east The East coordinate or the longitude of the origin.
+,x.x Rotation The rotation of the local north axis relative to geographical
+nort h.
+,x.x Rms_residual Empty or the rms value of the distance residuals of the
+global calibration.
+,x.x Max_residual The max residual value of the global calibration.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+UTM_or_rad The field UTM_or_rad is either U or r. When U, the Origin_north and
+_east fields are in UTM coordinates in meters and the Direction is in
+degrees. When r, the Origin_north, _east and Direction fields are all in
+radians.
+Tp_arra y The origin read by the HSC 400 in a PSIMLBO sentence is used for the
+array specified in the Tp_array field. An empty field is interpreted as zero.
+Zero means the origin of the Super array.
+Rotation The Rotation field may be empty. Then it is interpreted as zero when the
+UTM_or_rad field is r, and as the angle from Geographical north to UTM
+north when the UTM_or_rad field is U.
+Rms_residual,
+Max_residual
+The Rms_residual and the Max_residual fields are the quality parameters
+of the origin coordinates deriving from the global calibration. The values
+are in meters. The fields are empty when the origin is inserted by an
+operator.
+NMEA 0183
+LOQ - LBL Origin Quality.............................................................................................
+The PSIMLOQ sentence contains information about quality the origin.
+It always follow a PSIMLBO sentence when sent from the APOS.
+The format of the PSIMLOQ sentence is:
+Field Name Explanation
+$ Start_character
+PSIMLOQ Address The address for LBL Origin QA data.
+,c--c Tp_array The TP array for which the QA data is valid.
+,a_ UTM_or_rad m for error ellipse meter and degrees values
+r for covariance matrix values in radians.
+,x.x Major or Lat_var Major semi-axis of the origin error ellipse or
+covariance data.
+,x.x Minor or Lon_var Minor semi-axis of the origin error ellipse or
+covariance data.
+,x.x Direction or Rot_var The direction of the Major semi-axis of the
+origin error ellipse, or covariance data.
+,x.x Rot_stddev or
+Lat_lon_covar
+Empty or covariance data.
+,x.x Empty or
+Lat_rot_covar
+Empty or covariance data.
+,x.x Empty or
+Lon_rot_covar
+Empty or covariance data.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+UTM_or_rad The UTM_or_rad field is either m or r. When m, the QA data for the
+origin are printed as error ellipse data in meters and degrees. These
+data are the error ellipse semiaxes, the direction of the major semi-
+axis relative to the geographical north, and the stddev of the rotation
+of the coordinate system.
+When the UTM_or_rad field is r, the QA data are printed as
+covariance data in radians squared. The explanation of the
+covariance fields are shown in the list below.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Covariance
+matrix element
+Explanation
+Lat_var The variance of the origin in the latitude (i.e. north) direction.
+Lon_var The variance of the origin in the longitude (i.e. east) direction.
+Rot_v ar The variance of the rotation of the axes.
+Lat_lon_covar The covariance between the latitude and the longitude.
+Lat_rot_covar The covariance between the Latitude and the rotation.
+Lon_ro_covar The covariance between the Longitude and the rotation.
+NMEA 0183
+4 LBL RUN TIME CALIBRATION SENTENCES
+The LBL Run Time calibration is the process of deciding the positions
+of the transponders in the LBL array based on the LBL measurements
+when positioning in the array.
+The operator can save the LBL measurements that are logged for a
+calibration to a file. This section explains the NMEA sentences that
+are written to the file.
+The PSIMLBP and the PSIMLBL sentences are used in addition to the
+sentences explained in this section. PsimLBP contains the position of
+the vessel as calculated during the logging. There is one sentence for
+each measurement set. The PSIMLBL sentence contains the position
+of the transponder location.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+RCT - Run Time Calibration Tx
+The PSIMRCT sentence contains the position of the transducer
+relative to the vessel reference point when the LBL interrogation was
+done. It also contains the depth of the reference point, if known.
+The format of the PSIMRCT sentence is:
+Field Name Explanation
+$ Start_character
+PSIMRCT Address The address for Run Time calibration Tx.
+, Spare Reserved for Transceiver number.
+, Spare Reserved for Transducer number.
+,x.x Td North The Td-er North co-ordinate relative to
+the vessel reference point. [m].
+,x.x Td East The Td-er East --- " ---
+,x.x Td Down The Td-er Down --- " ---
+,x.x Reference Depth The depth of the vessel reference point.
+[m]. Empty when the depth is not known.
+,x.x Reference Depth 1 Sigma The 1-sigma uncertainty of the reference
+point depth [m]. Empty if the Reference
+depth field is empty.
+,Spare
+,Spare
+,Spare
+*hh Checksum Empty or checksum
+CRLF Termination
+Explanation of the fields in the sentence
+Transducer North, East and Down coordinates
+The position of the transducer when doing the LBL interrogation. It is
+the transducer-offset vector compensated for the vessel attitude when
+doing the Tx.
+Reference depth
+The depth of the vessel reference point is used in the LBL calculation
+when it is known. It is either the depth as derived from the transducer
+installation parameters, a manually inserted depth or the depth value
+read from a depth sensor (when the "vessel" is an ROV). The field is
+empty if the depth is not known.
+NMEA 0183
+The 1-sigma field contains the uncertainty of the depth in the previous
+field.
+RCM - Run Time Calibration Measurements
+The PSIMRCM sentence contains the LBL measurements done on a
+transducer towards one transponder location.
+The format of the PSIMRCM sentence is:
+Field Name Explanation
+$ Start_character
+PSIMRCM Address The address for Run Time Calibration
+Measurements.
+,xx__ Transceiver Rx Transceiver number.
+,xx__ Transducer Rx Transducer number.
+,xx__ Location Location index, a number between 0 and
+7.
+,x.x Td_North The Td-er North coordinate relative to the
+vessel reference point. [m].
+,x.x Td_East The Td-er East --- " ---
+,x.x Td_Down The Td-er Down --- " ---
+,x.x Range The V range from the Tx transducer to the
+transponder and back to the Rx transducer.
+,x.x Range 1-Sigma The 1-sigma uncertainty of the V range.
+,x.x Sinus_North Sinus of the North angle from the Rx Td-
+er to the transponder.
+,x.x Sinus_North 1-sigma The 1-sigma uncertainty of the sinus
+North a ngle.
+,x.x Sinus_East Sinus of the East angle from the Rx Td-er
+to the transponder.
+,x.x Sinus_East
+1-sigma
+The 1-sigma uncertainty of the sinus East
+angle.
+,Spare
+,Spare
+,Spare
+*hh Checksum Empty or checksum.
+CRLF Termination
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+Rx Transducer North, East and Down coordinates
+The position of the transducer when receiving the LBL measurement.
+It is the transducer-offset vector compensated for the vessel attitude
+when receiving the reply.
+Range, sinus to North and sinus to East
+The LBL range and direction measurements towards the transponder.
+If a measurement is not done, the field is empty.
+The 1-sigma fields contain the uncertainty of the field before. Empty
+if the field before is empty.
+NMEA 0183
+5 EXTERNAL CONTROL AND ACCESS
+SENTENCES
+This section describes the sentences that allow other computers (i.e.
+external equipment as seen from the APOS) to control functions in the
+APOS and to access some internal data.
+The sentences are often defined for special projects, and then
+implemented as a part of the system because they are useful for other
+projects/users too.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+RCP - Remote Control Positioning..................................................................................
+The PSIMRCP sentence contains information about how to activate
+and deactivate positioning from external equipment. The sentences for
+the remote control positioning are received on one of the APOS
+operator station.
+The format of the PSIMRCP sentence is:
+Field Name Explanation
+$ Start character
+PSIMRCP Address The address for remote control operation.
+,aa_ Type "S" indicates standard SSBL
+,aa_ Status "A" indicates activate , "D" indicates deactivate,
+"R" indicates deactivate and remove any definitions,
+"S" indicates deactivating all of 'Type', no Tp_code
+necessary.
+,x.x Int_interval Interrogation interval [s], 0.0 indicates fast as
+possible.
+,cc__ Tp_code Transponder channel.
+Examples: B01, B33, B47.
+, Spare1
+, Spare2
+, Spare3
+, Spare4
+*hh Checksum Empty or checksum.
+CRLF Termination
+When receiving a PSIMRCP sentence the APOS checks if the
+transponder channel already is defined for SSBL-positioning, if so it
+will activate/deactivate any positioning for the found object with the
+existing parameters (except "Int_interval"). If the channel don't exist
+and "activate" is wanted, a new standard SSBL positioning object will
+be created with the APOS default values as parameters (transducer,
+max range, power etc).
+Status "R" will remove the existing SSBL object from APOS, while
+status "D" will just deactivate the positioning and keep the parameters.
+"S" will deactivate all existing object of "Type", type would normally
+be SSBL.
+NMEA 0183
+SVT - Sound Velocity....................................................................................................
+The PSIMSVT sentence contains information about the sound velocity
+used by APOS in calculation of positions for HPR4xx and HiPAP.
+Since a sound profile could consist of many hundreds of points, many
+telegrams may be sent. The sentences for the sound velocity are sent
+on the operator’s request and when any changes.
+The format of the PSIMSVT sentence is:
+Field Name Explanation
+$ Start character
+PSIMSVT Address The address for sound velocity.
+,aa_ Description "P" indicates profile used. "M" for manual parameters.
+"R" indicates request for data.
+,x TotalPoints Total number of points in the sound profile.
+,x Index The index for the first point in this telegram
+A range from 0 to (TotalPoints -1).
+,x.x Depth1 Depth for the next sound velocity [m].
+,x.x Sv1 Sound velocity for the previous depth [m/s].
+,x.x Depth2 Depth for the next sound velocity [m].
+,x.x Sv2 Sound velocity for the previous depth [m/s].
+,x.x Depth3 Depth for the next sound velocity [m].
+,x.x Sv3 Sound velocity for the previous depth [m/s].
+,x.x Depth4 Depth for the next sound velocity [m].
+,x.x Sv4 Sound velocity for the previous depth [m/s].
+*hh Checksum Empty or checksum.
+CRLF Termination
+Empty field for not existing data (especially for the last telegram).
+If manual parameters selected then the first sound velocity will be
+transducer sound velocity, the second will be mean sound velocity and
+the third will be seabed sound velocity. All depths to be ignored.
+All points with increasing depths.
+If description is "R" the telegram is an input to APOS, and the
+telegram is a request to APOS to send it's sound velocity data.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+6 TRANSDUCER ALIGNMENT SENTENCES..........................................................
+This section describes the sentences that are defined for the transducer
+alignment function in the APOS.
+Some sentences are stored on the file when the measurements are
+saved. They contain the necessary information about what is
+measured, and a file with these measurements can be read by APOS to
+retrieve the measurements for post-processing.
+Other sentences are stored on file when the results are saved. They
+contain the information about the results. A file with these
+measurements can be read by programs like Excel and MatLab to
+analyze and to document the results.
+Sentences with the measurements
+When the measurements for a transducer alignment are saved to a file,
+the following sentences are used:
+y The $INZDA sentence. It is described in the NMEA standard from the
+"National Marine Electronics Association". It is the first sentence on the
+file. It tells the date of the measurements. The clock is stored in the
+PSIMSNS sentences for each measurement, but the date is missing in the
+PSIMSNS sentence.
+y The PSIMSNS sentence. There is one sentence for each sentence. It
+contains the clock (timestamp) of the measurements and the Roll, Pitch,
+Heading when the HiPAP / SSBL measurement was done. It is the same
+sentence as used for other purposes too.
+y The PSIMPPQ sentence. There is one sentence for each sentence. It
+contains the expected accuracy with which the measurement is done.
+y The PSIMPOP sentence. There is one sentence for each measurement. It
+contains the measurement itself, i.e. the position of the vessel as measured
+by the dGPS and the position of the transponder relative to the transducer as
+measured by the HiPAP / SSBL system.
+Each measurement is described by three sentences. The are linked
+together by having the same tag number. The sentences with the same
+tag number are stored in sequence, with the PSIMPOP sentence as the
+last one.
+NMEA 0183
+Sentences with the results...............................................................................................
+When the results from a transducer alignment are saved to a file, the
+following sentences are used.
+y The PSIMTDP sentence. One sentence with the installation parameters and
+one sentence with the calculated parameters are saved.
+y The PSIMTDQ sentence. One sentence with the expected 1-sigma accuracy
+of the parameters that are calculated.
+y The PSIMTPP sentence. There will be 2 sentence for each measured
+position pair, one with the UTM position of the transponder as measured
+with the installation parameters, and one with the UTM position after
+compensated with the calculated parameters. It will also be one sentence
+with the Boxed-in UTM position of the transponder.
+y The PSIMTPQ sentence. There will be one sentence with the expected 1-
+sigma accuracy of the boxed-in transponder position.
+y The PSIMVEP sentence. There will be one sentence with the vessel
+position for each position pair.
+The tag number in the sentences are used to link together the
+sentences for the same position pair.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+POP - Position Pair for Transducer alignment..................................................................
+The PSIMPOP sentence contains the dGPS and the HiPAP / SSBL
+measurements of a position pair used for Transducer Alignment. The
+sentence is used for storage on file when the operator saves the
+measurements done for a Transducer alignment.
+The format of the PSIMPOP sentence is:
+Field Name Explanation
+$ Start_character
+PSIMPOP Address The address for Position Pair.
+,cc__ Tp_code The channel number of the transponder.
+An example is B25.
+,A Status A for OK and V for not OK.
+,xx Tag Tag nu mber, li nki ng t his sentence to the
+PSIMSNS and the PSIMPOP sentences.
+,a_ UTM_or_rad U for UTM coordinates, r for radians.
+, Spare 1
+, Spare2
+,x.x Geographical_North The Geographical North co-ordinate of the
+vessel GPS antenna as measured by the dGPS
+receiver.
+,x.x Geographical_East The East co-ordinate -- " --.
+,x.x SSBL_Fwd The Forward co-ordinate of the transponder
+position relative to the transducer, as
+measured with the HiPAP/SSBL system.
+,x.x SSBL_Stb The Starboard co-ordinate -- " --
+,x.x SSBL_Down The Depth co-ordinate --"--
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+The positions in this sentence are as measured at the GPS antenna and
+at the HPR/HiPAP transducer before applying offsets, inclinations and
+roll pitch compensation. The positions are valid at the same time. The
+timetag and the attitude values are in the PSIMSNS sentence before
+this sentence.
+UTM_or_rad This field defines the denomination of the geographical coordinates.
+NMEA 0183
+When it is r, the position is in radians in the WGS 84 datum. This is
+the only denomination implemented so far.
+Geographical North and East
+
+These coordinates give the position of the vessel GPS antenna.
+
+SSBL Fwd, Stb and Down
+
+These coordinates are the position of the transponder relative to the
+transducer. The coordinates are in the transducer co-ordinate system,
+i.e. they are as measured by the transceiver before the roll pitch
+compensation and before the compensation with the transducer
+inclinations and offsets.
+
+Kongsberg Simrad HiPAP/HPR 400 System
+
+PPQ - Position Pair quality.............................................................................................
+The PSIMPPQ sentence contains information about the quality of a
+position pair used for Transducer Alignment. The sentence is used for
+storage on file when the operator saves the measurements done for a
+Transducer alignment.
+The format of the PSIMPPQ sentence is:
+Field Name Explanation
+$ Start_character
+PSIMPPQ Address Address for Position Pair Quality.
+,cc__ Tp_code The channel number of the transponder.
+An example is B25.
+,xx Tag Tag nu mber, li nki ng t his sentence to the
+PSIMSNS and the PSIMPOP sentences.
+, HiPAP_signal Signal level as reported by HiPAP
+, HiPAP_noise Noise level as reported by HiPAP
+,x.x North_var The variance in the North direction.
+,x.x East_var The variance in the East direction.
+,x.x Depth_var The variance in the Depth direction.
+,x.x North_East_covar The co-variance between the North and the
+East coordinates.
+,x.x North_Depth_covar The co-variance between the North and the
+Depth coordinates.
+,x.x East_Depth_covar The co-variance between the East and the
+Depth coordinates.
+*hh Checksum Empty or checksum
+CRLF Termination
+Explanation of the fields in the sentence
+The variance and the co-variance fields are with denomination meter
+square. The variance fields give the square of the expected accuracy of
+the transponder position in latitude, longitude and depth. It is the sum
+of the corresponding values for the dGPS measurement and the
+HiPAP / SSBL measurement.
+The six variance and co-variance fields are derived directly from the
+co-variance matrix in APOS, which is used to weight the
+measurement in the calculations.
+NMEA 0183
+TDP - Transducer Parameters for Transducer alignment...................................................
+The PSIMTDP sentence contains the transducer parameters. The
+sentence is used for storage on file when the operator saves the results
+from a Transducer alignment.
+Note! The VRU and Gyro rotation field are added in APOS version 5.6.0 in
+November 2001.
+
+The format of the PSIMTDP sentence is:
+Field Name Explanation
+$ Start character
+PSIMTDP Address The address for Transducer Parameters.
+,xx__ Transceiver Transceiver numbe r.
+,xx__ Transducer Transducer number and type.
+,c--c Contents The contents of the sentence.
+Initial, Calculated.
+,x.x Fwd offset The Forward offset of the transducer. [m].
+,x.x Stb offset The Starboard --- " ---
+,x.x Down offset The Down --- " ---.
+Empty when the sentence contains calculated offset.
+,x.x Roll inclination The roll inclination of transducer. [degrees]
+,x.x Pitch inclination The pitch -- " --.
+,x.x Gear inclination The gear -- " --
+If the transducer is of the mechanical tracking type, the
+field contains the rotation (synchro offset) of the
+transducer.
+,x.x Transducer sound
+velocity
+The transducer sound velocity.
+,x.x Mean sound
+velocity
+The mean sound velocity.
+,x.x VRU rotation The rotation of the VRU relative to the Gyro.
+,x.x Gyro rotation The rotation of the Gyro relative to the vessel centre-
+line.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+Transducer
+The transducer field contains the transducer number in the least
+significant digit and the transducer type in the next digit.
+The code for the type is the same as the code used in the binary
+position telegrams.
+Example
+Transducer field equal to 91 means transducer number 1 and
+transducer type 9 which is HiPAP 500.
+Contents
+The sentence contains one of the two possible sets of parameters.
+I for initial. The sentence contains the installation parameters of the
+transducer and the sound velocities as set on the APOS.
+C for calculated. The sentence contains the parameters as calculated by the
+transducer alignment function. The fields of the parameters not calculated
+are empty.
+NMEA 0183
+GPA - GPS antenna offset Parameters for Transducer alignment.......................................
+The PSIMGPA sentence contains the GPS antenna parameters. The
+sentence is used for storage on file when the operator saves the
+measurements and the results from a Transducer alignment.
+The format of the PSIMGPA sentence is:
+Field Name Explanation
+$ Start_character
+PSIMGPA Address The address for GPS Antenna.
+,x.x Installed_Fwd_offset The Forward offset of the GPS antenna. [m],
+as it was used during the logging of the
+measurements.
+,x.x Installed_Stb_offset The Starboard --- " ---
+,x.x Installed_Height_offset The Height --- " ---
+,x.x Installed_RollPitch Y or y if the GPS antenna was Roll/Pitch corrected
+during the post-processing.
+Empty or anything else if it was not.
+, Spare Spare.
+,x.x Correct_Fwd_offset The Forward offset of the GPS antenna, [m],
+as it was used during the postprocessing.
+,x.x Correct_Stb_offset The Starboard --- " ---
+,x.x Correct_Height_offset The Height --- " ---
+,x.x Correct_RollPitch Y or y if the GPS antenna was Roll/Pitch corrected
+during the post-processing.
+Empty or anything else if it was not.
+, Spare Spare.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+The sentence has two sets of parameters.
+The first set is for the antenna offset as it was installed and used
+during the logging of the measurements. Their names have the prefix
+Installed.
+The next set is for the antenna offset as it was used during the
+calculation (post-processing) of the measurements. They are assumed
+to be the correct ones, and their names therefore have the prefix
+Correct. They are normally the same as the Installed_ values. If one or
+more of the three Correct_ offset fields are empty, the correct antenna
+offset is the same as the installed antenna offset. If the
+Correct_RollPitch field is empty, the value is the same as the
+Installed_RollPitch.
+NMEA 0183
+TDQ - Transducer Parameters quality.............................................................................
+The PSIMTDQ sentence contains the expected 1-sigma accuracy of
+the parameters calculated for the transducer alignment. The sentence
+is used for storage on file when the operator saves the results from a
+Transducer alignment.
+Note! The accuracy of the VRU and Gyro rotation field are added in APOS
+version 5.6.0 in November 2001.
+
+The format of the PSIMTDQ sentence is:
+Field Name Explanation
+$ Start character
+PSIMTDQ Address The address for Transducer Parameters quality.
+,xx__ Transceiver Transceiver numbe r.
+,xx__ Transducer Transducer number.
+,c--c Contents The contents of the sentence.
+It is always C for calculated.
+,x.x Accuracy Fwd offset The accuracy of the calculated forward offset.
+[m].
+,x.x Accuracy Stb offset The same for the starboard offset.
+,x.x Accuracy Roll Inclination The accuracy of the calculated roll inclination.
+[degrees]
+,x.x Accuracy Pitch inclination The same for the pitch inclination.
+,x.x Accuracy Gear
+inclination
+The same for the pitch inclination.
+If the transducer is of the mechanical tracking
+type, the field contains the accuracy of the
+rotation (synchro offset) of the transducer.
+,x.x Accuracy Transducer sound
+velocity
+Accuracy of the transducer sound velocity.
+,x.x Accuracy Mean sound
+velocity
+Accuracy of the mean sound velocity.
+,x.x Accuracy VRU rotation Accuracy of the rotation of the VRU relative to
+the Gyro.
+, Reserved for accuracy Gyro
+rotation
+Reserved for future use.
+*hh Checksum Empty or checksum.
+CRLF Termination
+The fields of the parameters not calculated are empty.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+The accuracy of the parameters are the expected 1-sigma accuracy as
+calculated by the transducer alignment function. It is calculated based
+on our knowledge about the accuracy of the measurements in the
+position pairs, the number of position pairs used in the calculation,
+and the geometry between the vessel positions and the seabed
+transponder.
+The 1-sigma uncertainty value decreases when the number of
+measurements increases. That is correct when the errors on the
+measurements are random, which is assumed by the alignment
+function. In real life, however, there will also be some systematic
+errors. The contribution from the systematic errors is not reduced as
+the number of measurements increase. Please have this in mind when
+looking at the calculated 1-sigma errors. They may be unrealistic
+small when there are many measurements.
+NMEA 0183
+TPP - Transponder Position for Transducer alignment......................................................
+The PSIMTPP sentence contains the geographical position of a
+transponder. The sentence is used for storage on file when the operator
+saves the results from a Transducer alignment.
+The format of the PSIMTPP sentence is:
+Field Name Explanation
+$ Start_character
+PSIMTPP Address The address for Transponder Position.
+,cc__ Tp_code The channel number of the transponder.
+An example is B25.
+,c--c Contents The contents of the sentence.
+Measured, Compensated, Boxed-in.
+,A Status A for OK and V for not OK (Excluded.)
+,xx Tag Tag number, linking this sentence to the PSIMSNS
+and the PSIMPOP sentences.
+,a_ UTM_or_rad U for UTM coordinates, r for radians.
+, Spare 1
+, Spare2
+,x.x Geographical_North The Geographical North co-ordinate of the
+transponder.
+,x.x Geographical_East The East co-ordinate -- " --
+,x.x Depth The depth of the transponder.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Kongsberg Simrad HiPAP/HPR 400 System
+
+Explanation of the fields in the sentence
+Contents
+The sentence contains one of the following three possible three
+positions of the transponder.
+M for measured. The position is as measured with the original transducer
+installation parameters.
+C for compensated. The position is compensated with the Transducer
+alignment parameters and sound velocities that are calculated.
+B for Boxed in position. The position is the result of the Box-in. The Tag
+field is empty.
+Tag
+The tag is the measurement number. It is used to link this sentence to
+the other sentences on the file.
+UTM_or_rad This field defines the denomination of the geographical coordinates.
+When it is U, the position is in UTM coordinates in the APOS
+presentation datum. This is the only denomination implemented so
+far.
+Geographical North, East and Depth
+These coordinates give the position of the transponder. It is the sum of
+the dGPS position and position measured by the HiPAP/HPR system.
+NMEA 0183
+TPQ - Transponder Quality............................................................................................
+The PSIMTPQ sentence contains the statistical quality data for a
+boxed-in transponder position as calculated by the Transducer
+Alignment function. The sentence is used for storage on file when the
+operator saves the results.
+The format of the PSIMTPQ sentence is:
+Field Name Explanation
+$ Start_character
+PSIMTPQ Address The address for Transponder quality.
+,cc__ Tp_code The channel number of the transponder.
+An example is B25.
+,c--c Contents The contents of the sentence.
+It is always Boxed-in.
+, Spare 1
+, Spare2
+,x.x Major The major semi-axis in the error ellipse for the
+transponder position. [m].
+,x.x Minor The Minor semi-axis -- " --
+,x.x Direction The direction of the major semi-axis relative to
+north. [degrees]
+,x.x Depth accuracy The expected 1-sigma accuracy of the transponder
+depth.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+Contents
+It is always B for boxed in.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+VEP - Vessel Position for Transducer alignment..............................................................
+The PSIMVEP sentence contains the position of the vessel as
+measured by the dGPS when doing measurements for Transducer
+Alignment. The sentence is used for storage on file when the operator
+saves the results from a Transducer alignment.
+The format of the PSIMVEP sentence is:
+Field Name Explanation
+$ Start_character
+PSIMVEP Address The address for vessel position.
+,hhmmss.ss Time The real time of the measurement. Given as hour,
+minutes and seconds. The time format is UTC time.
+,A Status A for OK and V for not OK.
+,xx Tag Tag number, linking this sentence to the PSIMTPP
+sentence.
+,a_ UTM_or_rad U for UTM coordinates, r for radians.
+, Spare 1
+, Spare2
+,x.x Geographical_North The Geographical North co-ordinate of the vessel
+reference point as measured by the dGPS receiver.
+,x.x Geographical_East The East co-ordinate -- " --
+,x.x Heading The heading of the vessel.
+*hh Checksum Empty or checksum.
+CRLF Termination
+Explanation of the fields in the sentence
+Tag
+The tag is the measurement number. It is used to link this sentence to
+the other sentences on the file.
+UTM_or_rad This field defines the denomination of the geographical coordinates. When
+it is U, the position is in UTM coordinates in the APOS presentation
+datum. This is the only denomination implemented so far.
+Geographical North and East
+These coordinates give the position of the vessel reference point. The
+position is measured by the dGPS receiver, and offset from the GPS
+antenna to the vessel reference point.
+NMEA 0183
+7 NMEA 0183 STANDARD SENTENCES...................................................................
+This section describes some of the standard NMEA 0183 sentences
+that are used by the APOS. The use may need more explanation than
+in the document written by the NMEA 0183 Standards Committee.
+Most of the standard NMEA 0183 sentences used by the APOS are
+not described in this section, because they are used as described in the
+document written by the NMEA 0183 Standards Committee.
+Kongsberg Simrad HiPAP/HPR 400 System
+
+GLL - Geographic position Latitude Longitude................................................................
+When the $__GLL sentence is received by the APOS, it is interpreted
+as described in the document written by the NMEA 0183 Standards
+Committee. I.e. the latitude and the longitude is the position of the
+vessel. It is normally received from a GPS receiver.
+The $__GLL sentence may also be transmitted from the APOS. Then
+it contains the position of a SSBL transponder in latitude longitude.
+The format of the sentence is the same as described in the document
+written by the NMEA 0183 Standards Committee.
+This section describes the $__GLL sentence transmitted by the APOS.
+There is no information about the transponder code in the sentence. It
+is therefore recommended to log the PSIMSSB sentence together with
+the INGLL sentence. The PSIMSSB sentence gives you the
+transponder code and other status information. The timestamp of the
+PSIMSSB and the INGLL sentence are the same, enabling you to
+match the two sentences describing the same position.
+The format of the INGLL sentence is:
+Field Name Explanation
+$ Start_character
+INGLL Address The address
+,llll.ll Latitude Latitude of transponder. The format is
+DegreesMinutes.Decimalfractionofminute.
+Two digits for the degrees, two digits for the minutes. The
+number of digits for the fractional part of the minutes is
+optional.
+,a N/S N whe n nort h, S when sout h.
+,yyyyy.yy Longitude Longitude of transponder. The format is the same as for the
+latitude, except that 3 digits are used for the degrees.
+,a E/W E when east, W when west.
+,hhmmss.ss Time The time in hours minutes and seconds.
+The decimal fraction is optional. The time format is either local
+time or UTC time, depending on the selection in the menu.
+,A Status A when position is OK, V when not valid.
+,a Mode indicator It is always D. This field is optional, see below.
+*hh Checksum Empty or checksum.
+CRLF Termination
+NMEA 0183
+Mode indicator............................................................................................................
+The Mode indicator field is a new data field in the sentence, and
+it is defined in the NMEA standard V2.30. Some customers
+have coded the reception of the sentence before this field was
+added, and they reject the sentence when the field is present. We
+have therefore made this field optional. Ask Kongsberg Simrad
+how to add or remove this data field.
+Kongsberg Simrad HiPAP/HPR 400 System

@@ -1,0 +1,9 @@
+[project]
+name = "qgis-udp-nav"
+version = "0.1.0"
+description = "QGIS plugin for multi-feed UDP NMEA and Kongsberg positioning."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
