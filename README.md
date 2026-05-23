@@ -2,7 +2,7 @@
 
 QGIS UDP Nav is ~~slopware~~ ~~vibe code~~ *an agentically developed* QGIS plugin for receiving multiple concurrent UDP navigation feeds and visualizing vessel and subsea vehicle positions in real time.
 
-Developed using Github Copilot by someone that does not know what he is doing - use at your own risk.
+Developed using Github Copilot by a non-programmer - use at your own risk.
 
 Currently the plugin supports standard NMEA 0183 and Kongsberg HiPAP sentences. The plugin only targets UDP data streams, as QGIS natively supports receiving GPS signals via serial, and most survey vessels will offer a UDP stream over a physical serial cable for HiPAP signals anyway.
 
