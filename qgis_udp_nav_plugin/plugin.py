@@ -70,6 +70,8 @@ class QgisUdpNavPlugin:
         self._dock.feed_removed.connect(self._controller.remove_feed)
         self._dock.feed_start_requested.connect(self._controller.start_feed)
         self._dock.feed_stop_requested.connect(self._controller.stop_feed)
+        self._dock.save_tracks_requested.connect(self._controller.save_tracks)
+        self._dock.track_toggle_requested.connect(self._controller.set_track_enabled)
         self._dock.keep_center_requested.connect(self._controller.set_keep_center_target)
         self._dock.start_all_requested.connect(self._controller.start_all)
         self._dock.stop_all_requested.connect(self._controller.stop_all)

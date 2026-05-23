@@ -7,6 +7,7 @@ from qgis.PyQt.QtCore import QEvent, QPointF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QBrush, QPainter, QPalette, QPen, QPolygonF
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -21,8 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QLabel,
     QInputDialog,
-    QListWidget,
-    QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -77,13 +77,6 @@ def _single_selection_mode():
     return QAbstractItemView.SingleSelection
 
 
-def _no_selection_mode():
-    enum_cls = getattr(QAbstractItemView, "SelectionMode", None)
-    if enum_cls is not None and hasattr(enum_cls, "NoSelection"):
-        return enum_cls.NoSelection
-    return QAbstractItemView.NoSelection
-
-
 def _no_edit_triggers():
     enum_cls = getattr(QAbstractItemView, "EditTrigger", None)
     if enum_cls is not None and hasattr(enum_cls, "NoEditTriggers"):
@@ -110,27 +103,6 @@ def _align_center_flag():
     if enum_cls is not None and hasattr(enum_cls, "AlignCenter"):
         return enum_cls.AlignCenter
     return Qt.AlignCenter
-
-
-def _item_flag(name: str):
-    enum_cls = getattr(Qt, "ItemFlag", None)
-    if enum_cls is not None and hasattr(enum_cls, name):
-        return getattr(enum_cls, name)
-    return getattr(Qt, name)
-
-
-def _check_state(name: str):
-    enum_cls = getattr(Qt, "CheckState", None)
-    if enum_cls is not None and hasattr(enum_cls, name):
-        return getattr(enum_cls, name)
-    return getattr(Qt, name)
-
-
-def _item_data_role(name: str):
-    enum_cls = getattr(Qt, "ItemDataRole", None)
-    if enum_cls is not None and hasattr(enum_cls, name):
-        return getattr(enum_cls, name)
-    return getattr(Qt, name)
 
 
 def _event_type(name: str):
@@ -474,6 +446,12 @@ class FeedConfigDialog(QDialog):
         if bool(initial.get("vehicle_show_on_vessel_when_missing_position", False)):
             self.vehicle_fallback_combo.setCurrentIndex(1)
 
+        self.vessel_track_check = QCheckBox("Draw vessel track")
+        self.vessel_track_check.setChecked(bool(initial.get("vessel_track_enabled", False)))
+
+        self.vehicle_track_check = QCheckBox("Draw vehicle track")
+        self.vehicle_track_check.setChecked(bool(initial.get("vehicle_track_enabled", False)))
+
         self.manual_vessel_edit = QLineEdit(
             self._sentence_types_to_text(initial.get("manual_vessel_sentence_types", []))
         )
@@ -492,6 +470,8 @@ class FeedConfigDialog(QDialog):
         form.addRow("Target Mode", self.split_combo)
         form.addRow("Split Routing", self.routing_combo)
         form.addRow("Vehicle Fallback To Vessel", self.vehicle_fallback_combo)
+        form.addRow("Vessel Track", self.vessel_track_check)
+        form.addRow("Vehicle Track", self.vehicle_track_check)
         form.addRow("Manual Vessel Sentence Types", self.manual_vessel_edit)
         form.addRow("Manual Vehicle Sentence Types", self.manual_vehicle_edit)
         form.addRow("Stale Timeout (s)", self.stale_spin)
@@ -503,6 +483,8 @@ class FeedConfigDialog(QDialog):
 
         self._routing_label = form.labelForField(self.routing_combo)
         self._vehicle_fallback_label = form.labelForField(self.vehicle_fallback_combo)
+        self._vessel_track_label = form.labelForField(self.vessel_track_check)
+        self._vehicle_track_label = form.labelForField(self.vehicle_track_check)
         self._manual_vessel_label = form.labelForField(self.manual_vessel_edit)
         self._manual_vehicle_label = form.labelForField(self.manual_vehicle_edit)
 
@@ -530,6 +512,8 @@ class FeedConfigDialog(QDialog):
             "vehicle_show_on_vessel_when_missing_position": bool(
                 self.vehicle_fallback_combo.currentData()
             ),
+            "vessel_track_enabled": bool(self.vessel_track_check.isChecked()),
+            "vehicle_track_enabled": bool(self.vehicle_track_check.isChecked()),
             "manual_vessel_sentence_types": self._parse_sentence_types(
                 self.manual_vessel_edit.text()
             ),
@@ -552,6 +536,11 @@ class FeedConfigDialog(QDialog):
         self.routing_combo.setVisible(split_enabled)
         self._vehicle_fallback_label.setVisible(split_enabled)
         self.vehicle_fallback_combo.setVisible(split_enabled)
+        self._vehicle_track_label.setVisible(split_enabled)
+        self.vehicle_track_check.setVisible(split_enabled)
+
+        self._vessel_track_label.setVisible(True)
+        self.vessel_track_check.setVisible(True)
 
         show_manual = split_enabled and manual_mode
         self._manual_vessel_label.setVisible(show_manual)
@@ -1108,6 +1097,8 @@ class FeedDockWidget(QDockWidget):
     keep_center_requested = pyqtSignal(str, str, bool, list)
     start_all_requested = pyqtSignal()
     stop_all_requested = pyqtSignal()
+    save_tracks_requested = pyqtSignal(str, str, str)
+    track_toggle_requested = pyqtSignal(str, str, bool)
     color_changed = pyqtSignal(str, str, str)
     symbol_changed = pyqtSignal(str, dict)
     vessel_profiles_updated = pyqtSignal(dict)
@@ -1126,8 +1117,7 @@ class FeedDockWidget(QDockWidget):
         self._keep_center_enabled = False
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
-        self._constellation_source_ids: Set[str] = set()
-        self._updating_constellation_sources = False
+        self._group_source_ids: Set[str] = set()
         self._max_log_lines = 600
 
         root = QWidget(self)
@@ -1151,10 +1141,21 @@ class FeedDockWidget(QDockWidget):
         self._keep_vessel_center_button.setCheckable(True)
         self._keep_vehicle_center_button = QPushButton("Keep Vehicle Center")
         self._keep_vehicle_center_button.setCheckable(True)
-        self._keep_constellation_center_button = QPushButton("Keep Constellation Center")
-        self._keep_constellation_center_button.setCheckable(True)
+        self._keep_group_center_button = QPushButton("Keep Group Center")
+        self._keep_group_center_button.setCheckable(True)
+        self._track_vessel_button = QPushButton("Track Vessel")
+        self._track_vessel_button.setCheckable(True)
+        self._track_vehicle_button = QPushButton("Track Vehicle")
+        self._track_vehicle_button.setCheckable(True)
+        self._group_options_button = QPushButton("Group Sources")
+        self._save_tracks_button = QPushButton("Save Tracks")
         self._info_cards_button = QPushButton("Info Cards")
         self._info_cards_button.setCheckable(True)
+        self._group_menu = QMenu(self)
+        self._group_options_button.setMenu(self._group_menu)
+        self._group_options_button.setToolTip(
+            "Choose which live sources are included in Group center."
+        )
 
         self._keep_vessel_center_button.setToolTip(
             "Continuously center map on vessel position for selected feed."
@@ -1162,9 +1163,21 @@ class FeedDockWidget(QDockWidget):
         self._keep_vehicle_center_button.setToolTip(
             "Continuously center map on vehicle position for selected feed."
         )
-        self._keep_constellation_center_button.setToolTip(
-            "Continuously center map on the average of selected constellation sources."
+        self._keep_group_center_button.setToolTip(
+            "Continuously center map on the average of selected Group sources."
         )
+        self._track_vessel_button.setToolTip(
+            "Enable/disable vessel track drawing for selected feed."
+        )
+        self._track_vehicle_button.setToolTip(
+            "Enable/disable vehicle track drawing for selected feed (split mode)."
+        )
+        self._save_tracks_button.setToolTip(
+            "Save active vessel/vehicle tracks to the persistent saved-tracks layer."
+        )
+        self._track_vessel_button.setEnabled(False)
+        self._track_vehicle_button.setEnabled(False)
+        self._save_tracks_button.setEnabled(False)
 
         button_grid.addWidget(self._add_button, 0, 0)
         button_grid.addWidget(self._edit_button, 0, 1)
@@ -1177,8 +1190,12 @@ class FeedDockWidget(QDockWidget):
         button_grid.addWidget(self._stop_all_button, 2, 2)
         button_grid.addWidget(self._keep_vessel_center_button, 3, 0)
         button_grid.addWidget(self._keep_vehicle_center_button, 3, 1)
-        button_grid.addWidget(self._keep_constellation_center_button, 3, 2)
-        button_grid.addWidget(self._info_cards_button, 4, 0)
+        button_grid.addWidget(self._keep_group_center_button, 3, 2)
+        button_grid.addWidget(self._group_options_button, 4, 0, 1, 2)
+        button_grid.addWidget(self._info_cards_button, 4, 2)
+        button_grid.addWidget(self._track_vessel_button, 5, 0)
+        button_grid.addWidget(self._track_vehicle_button, 5, 1)
+        button_grid.addWidget(self._save_tracks_button, 5, 2)
 
         self._table = QTableWidget(0, 9)
         self._table.setHorizontalHeaderLabels(
@@ -1249,20 +1266,6 @@ class FeedDockWidget(QDockWidget):
         splitter.setStretchFactor(1, 2)
         splitter.setChildrenCollapsible(False)
 
-        self._constellation_widget = QWidget(self)
-        constellation_layout = QVBoxLayout(self._constellation_widget)
-        constellation_layout.setContentsMargins(0, 0, 0, 0)
-        constellation_layout.setSpacing(4)
-        constellation_label = QLabel("Constellation Sources")
-        self._constellation_sources_list = QListWidget(self)
-        self._constellation_sources_list.setSelectionMode(_no_selection_mode())
-        self._constellation_sources_list.setMaximumHeight(100)
-        self._constellation_sources_list.setToolTip(
-            "Checked sources are averaged for Keep Constellation Center."
-        )
-        constellation_layout.addWidget(constellation_label)
-        constellation_layout.addWidget(self._constellation_sources_list)
-
         self._info_cards_widget = QWidget(self)
         info_layout = QHBoxLayout(self._info_cards_widget)
         info_layout.setContentsMargins(0, 0, 0, 0)
@@ -1271,7 +1274,15 @@ class FeedDockWidget(QDockWidget):
         self._heading_card = QLabel("Heading\n--")
         self._speed_card = QLabel("Speed\n--")
         self._depth_card = QLabel("Depth\n--")
-        for card in (self._heading_card, self._speed_card, self._depth_card):
+        self._track_raw_card = QLabel("Track Raw\n--")
+        self._track_smooth_card = QLabel("Track Smooth\n--")
+        for card in (
+            self._heading_card,
+            self._speed_card,
+            self._depth_card,
+            self._track_raw_card,
+            self._track_smooth_card,
+        ):
             card.setAlignment(_align_center_flag())
             card.setMinimumHeight(54)
             card.setWordWrap(True)
@@ -1282,7 +1293,6 @@ class FeedDockWidget(QDockWidget):
         self._info_cards_widget.setVisible(False)
 
         root_layout.addLayout(button_grid)
-        root_layout.addWidget(self._constellation_widget)
         root_layout.addWidget(splitter)
         root_layout.addWidget(self._info_cards_widget)
 
@@ -1297,13 +1307,14 @@ class FeedDockWidget(QDockWidget):
         self._stop_button.clicked.connect(self._on_stop_clicked)
         self._keep_vessel_center_button.toggled.connect(self._on_keep_vessel_center_toggled)
         self._keep_vehicle_center_button.toggled.connect(self._on_keep_vehicle_center_toggled)
-        self._keep_constellation_center_button.toggled.connect(
-            self._on_keep_constellation_center_toggled
+        self._keep_group_center_button.toggled.connect(
+            self._on_keep_group_center_toggled
         )
-        self._constellation_sources_list.itemChanged.connect(
-            self._on_constellation_source_item_changed
-        )
+        self._track_vessel_button.toggled.connect(self._on_track_vessel_toggled)
+        self._track_vehicle_button.toggled.connect(self._on_track_vehicle_toggled)
+        self._group_menu.aboutToShow.connect(self._refresh_group_sources)
         self._info_cards_button.toggled.connect(self._on_info_cards_toggled)
+        self._save_tracks_button.clicked.connect(self._on_save_tracks_clicked)
         self._start_all_button.clicked.connect(self.start_all_requested)
         self._stop_all_button.clicked.connect(self.stop_all_requested)
         self._pause_debug_button.toggled.connect(self._on_pause_toggled)
@@ -1359,10 +1370,12 @@ class FeedDockWidget(QDockWidget):
             if log_feed_id not in self._sentence_snapshots:
                 self._sentence_snapshots[log_feed_id] = {}
 
-        self._refresh_constellation_sources()
+        self._prune_group_sources_from_rows()
 
         if selected_feed:
             self._select_feed_row(selected_feed)
+        if self._selected_feed_id() is None and self._table.rowCount() > 0:
+            self._table.selectRow(0)
 
         self._refresh_debug_panel()
 
@@ -1510,6 +1523,35 @@ class FeedDockWidget(QDockWidget):
         self._sentence_snapshots[feed_id] = {}
         self._refresh_debug_panel()
 
+    def _on_save_tracks_clicked(self) -> None:
+        base_feed_id = self._selected_base_feed_id()
+        if not base_feed_id:
+            return
+
+        planned_number, planned_ok = QInputDialog.getText(
+            self,
+            "Save Tracks",
+            "Planned Number:",
+            text="",
+        )
+        if not planned_ok:
+            return
+
+        actual_number, actual_ok = QInputDialog.getText(
+            self,
+            "Save Tracks",
+            "Actual Number:",
+            text="",
+        )
+        if not actual_ok:
+            return
+
+        self.save_tracks_requested.emit(
+            base_feed_id,
+            str(planned_number or "").strip(),
+            str(actual_number or "").strip(),
+        )
+
     def _on_pause_toggled(self, paused: bool) -> None:
         feed_id = self._selected_base_feed_id()
         if not feed_id:
@@ -1542,8 +1584,30 @@ class FeedDockWidget(QDockWidget):
     def _on_keep_vehicle_center_toggled(self, enabled: bool) -> None:
         self._on_keep_center_mode_toggled("vehicle", enabled)
 
-    def _on_keep_constellation_center_toggled(self, enabled: bool) -> None:
-        self._on_keep_center_mode_toggled("constellation", enabled)
+    def _on_keep_group_center_toggled(self, enabled: bool) -> None:
+        self._on_keep_center_mode_toggled("group", enabled)
+
+    def _on_track_vessel_toggled(self, enabled: bool) -> None:
+        self._on_track_mode_toggled("vessel", enabled)
+
+    def _on_track_vehicle_toggled(self, enabled: bool) -> None:
+        self._on_track_mode_toggled("vehicle", enabled)
+
+    def _on_track_mode_toggled(self, mode: str, enabled: bool) -> None:
+        base_feed_id = self._selected_base_feed_id()
+        if not base_feed_id:
+            self._set_track_mode_button_checked(mode, False)
+            self._sync_keep_center_button_state()
+            return
+
+        base_row = self._rows_by_feed.get(base_feed_id, {})
+        split_enabled = bool(base_row.get("split_subfeeds_enabled", False))
+        if mode == "vehicle" and not split_enabled:
+            self._set_track_mode_button_checked("vehicle", False)
+            self._sync_keep_center_button_state()
+            return
+
+        self.track_toggle_requested.emit(base_feed_id, mode, bool(enabled))
 
     def _on_keep_center_mode_toggled(self, mode: str, enabled: bool) -> None:
         if not enabled:
@@ -1553,7 +1617,7 @@ class FeedDockWidget(QDockWidget):
                     disable_feed_id,
                     mode,
                     False,
-                    self._constellation_selected_sources_payload(),
+                    self._group_selected_sources_payload(),
                 )
                 self._keep_center_enabled = False
                 self._keep_center_feed_id = ""
@@ -1575,86 +1639,125 @@ class FeedDockWidget(QDockWidget):
             self._sync_keep_center_button_state()
             return
 
-        selected_sources = self._constellation_selected_sources_payload()
+        selected_sources = self._group_selected_sources_payload()
         if not selected_sources:
             QMessageBox.information(
                 self,
-                "Constellation Sources",
-                "Select at least one constellation source before enabling center tracking.",
+                "Group Sources",
+                "Select at least one group source before enabling center tracking.",
             )
-            self._set_keep_center_mode_button_checked("constellation", False)
+            self._set_keep_center_mode_button_checked("group", False)
             self._sync_keep_center_button_state()
             return
 
         self._keep_center_enabled = True
         self._keep_center_feed_id = ""
-        self._keep_center_role = "constellation"
-        self.keep_center_requested.emit("", "constellation", True, selected_sources)
+        self._keep_center_role = "group"
+        self.keep_center_requested.emit("", "group", True, selected_sources)
         self._sync_keep_center_button_state()
 
-    def _on_constellation_source_item_changed(self, item: QListWidgetItem) -> None:
-        if self._updating_constellation_sources:
-            return
-
-        source_id = str(item.data(_item_data_role("UserRole")) or "").strip()
-        if not source_id:
-            return
-
-        checked = int(item.checkState()) == int(_check_state("Checked"))
+    def _on_group_source_toggled(self, source_id: str, checked: bool) -> None:
+        previous_selected = set(self._group_source_ids)
         if checked:
-            self._constellation_source_ids.add(source_id)
+            self._group_source_ids.add(source_id)
         else:
-            self._constellation_source_ids.discard(source_id)
+            self._group_source_ids.discard(source_id)
+        self._handle_group_sources_changed(previous_selected)
 
-        if self._keep_center_enabled and self._keep_center_role == "constellation":
-            selected_sources = self._constellation_selected_sources_payload()
-            if selected_sources:
-                self.keep_center_requested.emit("", "constellation", True, selected_sources)
-            else:
-                self.keep_center_requested.emit("", "constellation", False, [])
-                self._keep_center_enabled = False
-                self._keep_center_feed_id = ""
-                self._keep_center_role = "vessel"
+    def _set_all_group_sources(self, checked: bool) -> None:
+        previous_selected = set(self._group_source_ids)
+        source_ids = {source_id for source_id, _ in self._group_candidates()}
+        if checked:
+            self._group_source_ids = set(source_ids)
+        else:
+            self._group_source_ids.clear()
 
-        self._sync_keep_center_button_state()
+        for action in self._group_menu.actions():
+            source_id = action.data()
+            if not isinstance(source_id, str) or not source_id:
+                continue
+            blocker = action.blockSignals(True)
+            action.setChecked(source_id in self._group_source_ids)
+            action.blockSignals(blocker)
 
-    def _refresh_constellation_sources(self) -> None:
-        candidates = self._constellation_candidates()
-        available_ids = {source_id for source_id, _ in candidates}
-        previous_selected = set(self._constellation_source_ids)
-        self._constellation_source_ids = {
-            source_id for source_id in self._constellation_source_ids if source_id in available_ids
+        self._handle_group_sources_changed(previous_selected)
+
+    def _prune_group_sources_from_rows(self) -> None:
+        available_ids = {source_id for source_id, _ in self._group_candidates()}
+        previous_selected = set(self._group_source_ids)
+        self._group_source_ids = {
+            source_id for source_id in self._group_source_ids if source_id in available_ids
         }
 
-        self._updating_constellation_sources = True
-        try:
-            self._constellation_sources_list.clear()
-            for source_id, label in candidates:
-                item = QListWidgetItem(label)
-                item.setFlags(item.flags() | _item_flag("ItemIsUserCheckable"))
-                item.setData(_item_data_role("UserRole"), source_id)
-                if source_id in self._constellation_source_ids:
-                    item.setCheckState(_check_state("Checked"))
-                else:
-                    item.setCheckState(_check_state("Unchecked"))
-                self._constellation_sources_list.addItem(item)
-        finally:
-            self._updating_constellation_sources = False
+        if previous_selected != self._group_source_ids:
+            self._handle_group_sources_changed(previous_selected)
+            return
 
-        if self._keep_center_enabled and self._keep_center_role == "constellation":
-            selected_sources = self._constellation_selected_sources_payload()
+        # Keep button enabled/disabled state in sync with changing rows without
+        # rebuilding the popup menu while live data is streaming.
+        self._sync_keep_center_button_state()
+
+    def _refresh_group_sources(self) -> None:
+        candidates = self._group_candidates()
+        available_ids = {source_id for source_id, _ in candidates}
+        previous_selected = set(self._group_source_ids)
+        self._group_source_ids = {
+            source_id for source_id in self._group_source_ids if source_id in available_ids
+        }
+
+        self._group_menu.clear()
+        if not candidates:
+            empty_action = self._group_menu.addAction("No sources available")
+            empty_action.setEnabled(False)
+            self._handle_group_sources_changed(previous_selected)
+            return
+
+        select_all_action = self._group_menu.addAction("Select All")
+        select_all_action.triggered.connect(
+            lambda _checked=False: self._set_all_group_sources(True)
+        )
+        clear_all_action = self._group_menu.addAction("Clear All")
+        clear_all_action.triggered.connect(
+            lambda _checked=False: self._set_all_group_sources(False)
+        )
+        self._group_menu.addSeparator()
+
+        for source_id, label in candidates:
+            action = self._group_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(source_id in self._group_source_ids)
+            action.setData(source_id)
+            action.toggled.connect(
+                lambda checked, sid=source_id: self._on_group_source_toggled(sid, checked)
+            )
+
+        self._handle_group_sources_changed(previous_selected)
+
+    def _handle_group_sources_changed(self, previous_selected: Set[str]) -> None:
+        self._update_group_options_button_text()
+
+        if self._keep_center_enabled and self._keep_center_role == "group":
+            selected_sources = self._group_selected_sources_payload()
             if selected_sources:
-                if previous_selected != self._constellation_source_ids:
-                    self.keep_center_requested.emit("", "constellation", True, selected_sources)
+                if previous_selected != self._group_source_ids:
+                    self.keep_center_requested.emit("", "group", True, selected_sources)
             else:
-                self.keep_center_requested.emit("", "constellation", False, [])
+                self.keep_center_requested.emit("", "group", False, [])
                 self._keep_center_enabled = False
                 self._keep_center_feed_id = ""
                 self._keep_center_role = "vessel"
 
         self._sync_keep_center_button_state()
 
-    def _constellation_candidates(self) -> List[tuple[str, str]]:
+    def _update_group_options_button_text(self) -> None:
+        total = len(self._group_candidates())
+        selected = len(self._group_source_ids)
+        if total <= 0:
+            self._group_options_button.setText("Group Sources")
+            return
+        self._group_options_button.setText(f"Group Sources ({selected}/{total})")
+
+    def _group_candidates(self) -> List[tuple[str, str]]:
         candidates: List[tuple[str, str]] = []
         for source_id, row_data in self._rows_by_feed.items():
             row_kind = str(row_data.get("row_kind") or "").strip().lower()
@@ -1682,18 +1785,31 @@ class FeedDockWidget(QDockWidget):
         candidates.sort(key=lambda item: (item[1].lower(), item[0]))
         return candidates
 
-    def _constellation_selected_sources_payload(self) -> list[str]:
-        return sorted(self._constellation_source_ids)
+    def _group_selected_sources_payload(self) -> list[str]:
+        return sorted(self._group_source_ids)
 
     def _set_keep_center_mode_button_checked(self, mode: str, checked: bool) -> None:
         button_map = {
             "vessel": self._keep_vessel_center_button,
             "vehicle": self._keep_vehicle_center_button,
-            "constellation": self._keep_constellation_center_button,
+            "group": self._keep_group_center_button,
         }
         button = button_map.get(mode)
         if button is None:
             return
+        blocker = button.blockSignals(True)
+        button.setChecked(bool(checked))
+        button.blockSignals(blocker)
+
+    def _set_track_mode_button_checked(self, mode: str, checked: bool) -> None:
+        button_map = {
+            "vessel": self._track_vessel_button,
+            "vehicle": self._track_vehicle_button,
+        }
+        button = button_map.get(mode)
+        if button is None:
+            return
+
         blocker = button.blockSignals(True)
         button.setChecked(bool(checked))
         button.blockSignals(blocker)
@@ -1734,7 +1850,13 @@ class FeedDockWidget(QDockWidget):
             "}"
         )
 
-        for card in (self._heading_card, self._speed_card, self._depth_card):
+        for card in (
+            self._heading_card,
+            self._speed_card,
+            self._depth_card,
+            self._track_raw_card,
+            self._track_smooth_card,
+        ):
             card.setStyleSheet(card_style)
 
     def _refresh_info_cards(self) -> None:
@@ -1748,6 +1870,10 @@ class FeedDockWidget(QDockWidget):
         heading_source = str(row_data.get("heading_source") or "").strip()
         speed_knots = row_data.get("speed_knots")
         depth_m = row_data.get("depth_m")
+        track_enabled = bool(row_data.get("track_enabled", False))
+        track_dimension = str(row_data.get("track_dimension") or "2d").strip().lower()
+        track_raw_m = row_data.get("track_raw_m")
+        track_smoothed_m = row_data.get("track_smoothed_m")
 
         if isinstance(heading, (int, float)):
             heading_text = f"Heading\n{float(heading):.1f} deg"
@@ -1772,18 +1898,54 @@ class FeedDockWidget(QDockWidget):
             else:
                 depth_text = "Depth\nn/a"
 
+        track_suffix = "3D" if track_dimension == "3d" else "2D"
+        if not track_enabled:
+            track_raw_text = f"Track Raw {track_suffix}\noff"
+            track_smooth_text = f"Track Smooth {track_suffix}\noff"
+        else:
+            if isinstance(track_raw_m, (int, float)):
+                track_raw_text = f"Track Raw {track_suffix}\n{float(track_raw_m):.1f} m"
+            else:
+                track_raw_text = f"Track Raw {track_suffix}\n--"
+
+            if isinstance(track_smoothed_m, (int, float)):
+                track_smooth_text = (
+                    f"Track Smooth {track_suffix}\n{float(track_smoothed_m):.1f} m"
+                )
+            else:
+                track_smooth_text = f"Track Smooth {track_suffix}\n--"
+
         self._heading_card.setText(heading_text)
         self._speed_card.setText(speed_text)
         self._depth_card.setText(depth_text)
+        self._track_raw_card.setText(track_raw_text)
+        self._track_smooth_card.setText(track_smooth_text)
 
     def _sync_keep_center_button_state(self) -> None:
         base_feed_id = self._selected_base_feed_id()
         has_base_feed = bool(base_feed_id)
-        has_constellation_sources = self._constellation_sources_list.count() > 0
+        has_group_sources = len(self._group_candidates()) > 0
+        base_row = self._rows_by_feed.get(base_feed_id, {}) if has_base_feed else {}
+
+        split_enabled = bool(base_row.get("split_subfeeds_enabled", False))
+        vessel_track_enabled = bool(base_row.get("vessel_track_enabled", False))
+        vehicle_track_enabled = bool(base_row.get("vehicle_track_enabled", False)) and split_enabled
 
         self._keep_vessel_center_button.setEnabled(has_base_feed)
         self._keep_vehicle_center_button.setEnabled(has_base_feed)
-        self._keep_constellation_center_button.setEnabled(has_constellation_sources)
+        self._keep_group_center_button.setEnabled(has_group_sources)
+        self._track_vessel_button.setEnabled(has_base_feed)
+        self._track_vehicle_button.setEnabled(has_base_feed and split_enabled)
+        self._save_tracks_button.setEnabled(has_base_feed)
+
+        self._set_track_mode_button_checked("vessel", vessel_track_enabled)
+        self._set_track_mode_button_checked("vehicle", vehicle_track_enabled)
+        self._track_vessel_button.setText(
+            "Track Vessel: On" if vessel_track_enabled else "Track Vessel"
+        )
+        self._track_vehicle_button.setText(
+            "Track Vehicle: On" if vehicle_track_enabled else "Track Vehicle"
+        )
 
         vessel_active = (
             self._keep_center_enabled
@@ -1797,11 +1959,11 @@ class FeedDockWidget(QDockWidget):
             and has_base_feed
             and self._keep_center_feed_id == base_feed_id
         )
-        constellation_active = self._keep_center_enabled and self._keep_center_role == "constellation"
+        group_active = self._keep_center_enabled and self._keep_center_role == "group"
 
         self._set_keep_center_mode_button_checked("vessel", vessel_active)
         self._set_keep_center_mode_button_checked("vehicle", vehicle_active)
-        self._set_keep_center_mode_button_checked("constellation", constellation_active)
+        self._set_keep_center_mode_button_checked("group", group_active)
 
         self._keep_vessel_center_button.setText(
             "Centering Vessel" if vessel_active else "Keep Vessel Center"
@@ -1809,11 +1971,12 @@ class FeedDockWidget(QDockWidget):
         self._keep_vehicle_center_button.setText(
             "Centering Vehicle" if vehicle_active else "Keep Vehicle Center"
         )
-        self._keep_constellation_center_button.setText(
-            "Centering Constellation"
-            if constellation_active
-            else "Keep Constellation Center"
+        self._keep_group_center_button.setText(
+            "Centering Group"
+            if group_active
+            else "Keep Group Center"
         )
+        self._update_group_options_button_text()
 
     def _sync_stop_button_state_from_selected_row(self) -> None:
         base_feed_id = self._selected_base_feed_id()
@@ -1929,7 +2092,7 @@ class FeedDockWidget(QDockWidget):
                     self._keep_center_feed_id,
                     self._keep_center_role,
                     False,
-                    self._constellation_selected_sources_payload(),
+                    self._group_selected_sources_payload(),
                 )
                 self._keep_center_enabled = False
                 self._keep_center_feed_id = ""

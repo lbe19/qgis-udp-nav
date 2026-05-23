@@ -120,3 +120,21 @@ def test_feed_config_allows_sub_meter_vessel_and_vehicle_dimensions() -> None:
     assert config.vessel_width_m == 0.12
     assert config.vehicle_vessel_length_m == 0.35
     assert config.vehicle_vessel_width_m == 0.08
+
+
+def test_feed_config_persists_track_toggle_fields() -> None:
+    config = FeedConfig.from_dict(
+        {
+            "feed_id": "feed-g",
+            "name": "Feed G",
+            "vessel_track_enabled": True,
+            "vehicle_track_enabled": True,
+        }
+    )
+
+    assert config.vessel_track_enabled is True
+    assert config.vehicle_track_enabled is True
+
+    payload = config.to_dict()
+    assert payload["vessel_track_enabled"] is True
+    assert payload["vehicle_track_enabled"] is True

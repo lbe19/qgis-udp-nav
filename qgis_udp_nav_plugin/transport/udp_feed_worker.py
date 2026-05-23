@@ -53,11 +53,16 @@ class UdpFeedWorker(QObject):
         self._stale_timer: Optional[QTimer] = None
         self._last_datagram_ts = 0.0
         self._stale_reported = False
+        self._stopping = False
+
+    _MAX_DATAGRAMS_PER_CYCLE = 200
 
     @pyqtSlot()
     def start(self) -> None:
         if self._socket is not None:
             return
+
+        self._stopping = False
 
         self._socket = QUdpSocket(self)
         address = QHostAddress(self._config.bind_host)
@@ -95,12 +100,18 @@ class UdpFeedWorker(QObject):
 
     @pyqtSlot()
     def stop(self) -> None:
+        self._stopping = True
+
         if self._stale_timer is not None:
             self._stale_timer.stop()
             self._stale_timer.deleteLater()
             self._stale_timer = None
 
         if self._socket is not None:
+            try:
+                self._socket.readyRead.disconnect(self._on_ready_read)
+            except TypeError:
+                pass
             self._socket.close()
             self._socket.deleteLater()
             self._socket = None
@@ -110,10 +121,14 @@ class UdpFeedWorker(QObject):
 
     @pyqtSlot()
     def _on_ready_read(self) -> None:
-        if self._socket is None:
+        if self._socket is None or self._should_abort_processing():
             return
 
-        while self._socket.hasPendingDatagrams():
+        processed = 0
+        while self._socket is not None and self._socket.hasPendingDatagrams():
+            if self._should_abort_processing():
+                break
+
             payload, source_address = self._read_datagram()
             if payload is None:
                 continue
@@ -133,6 +148,18 @@ class UdpFeedWorker(QObject):
             for event in events:
                 self.event_received.emit(event)
 
+            processed += 1
+            if processed >= self._MAX_DATAGRAMS_PER_CYCLE:
+                break
+
+        if (
+            self._socket is not None
+            and self._socket.hasPendingDatagrams()
+            and not self._should_abort_processing()
+        ):
+            # Yield to the event loop so stop/quit requests are not starved.
+            QTimer.singleShot(0, self._on_ready_read)
+
     def _read_datagram(self) -> Tuple[Optional[bytes], str]:
         if self._socket is None:
             return None, ""
@@ -150,6 +177,9 @@ class UdpFeedWorker(QObject):
 
     @pyqtSlot()
     def _check_stale(self) -> None:
+        if self._should_abort_processing():
+            return
+
         if self._stale_reported:
             return
 
@@ -162,3 +192,12 @@ class UdpFeedWorker(QObject):
                 "warning",
                 f"No datagrams received for {age:.1f}s",
             )
+
+    def _should_abort_processing(self) -> bool:
+        if self._stopping:
+            return True
+
+        thread = self.thread()
+        if thread is not None and thread.isInterruptionRequested():
+            return True
+        return False

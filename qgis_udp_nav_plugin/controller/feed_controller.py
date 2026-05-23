@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import math
 import os
+import shutil
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -34,8 +35,8 @@ _AUTO_VESSEL_SENTENCE_TYPES = {
 }
 _AUTO_VEHICLE_SENTENCE_TYPES = {"PSIMSSB", "PSIMSNS"}
 _SUBFEED_ROLES = {"vessel", "vehicle"}
-_KEEP_CENTER_MODES = {"vessel", "vehicle", "constellation"}
-_CONSTELLATION_DEFAULT_MAX_AGE_SEC = 15
+_KEEP_CENTER_MODES = {"vessel", "vehicle", "group"}
+_GROUP_DEFAULT_MAX_AGE_SEC = 15
 
 
 def _queued_connection_type():
@@ -131,6 +132,8 @@ class FeedController(QObject):
                 "vehicle_show_on_vessel_when_missing_position",
                 False,
             ),
+            "vessel_track_enabled": payload.get("vessel_track_enabled", False),
+            "vehicle_track_enabled": payload.get("vehicle_track_enabled", False),
             "manual_vessel_sentence_types": payload.get("manual_vessel_sentence_types", []),
             "manual_vehicle_sentence_types": payload.get("manual_vehicle_sentence_types", []),
             "vehicle_icon_path": payload.get("vehicle_icon_path", ""),
@@ -218,7 +221,7 @@ class FeedController(QObject):
         self._feeds.pop(feed_id, None)
         self._remove_status_slots(feed_id)
         self._clear_render_state(feed_id)
-        if self._keep_center_role == "constellation":
+        if self._keep_center_role == "group":
             prefix = f"{feed_id}:"
             self._keep_center_source_ids = [
                 source_id
@@ -310,9 +313,122 @@ class FeedController(QObject):
             if feed.enabled:
                 self.start_feed(feed.feed_id)
 
-    def stop_all(self) -> None:
+    def stop_all(self, force: bool = False) -> None:
         for feed_id in list(self._workers.keys()):
-            self.stop_feed(feed_id)
+            self.stop_feed(feed_id, force=force)
+
+    def save_tracks(self, feed_id: str, planned_number: str, actual_number: str) -> None:
+        base_feed_id = str(feed_id or "").strip()
+        if not base_feed_id:
+            return
+
+        feed = self._feeds.get(base_feed_id)
+        if feed is None:
+            return
+
+        entries: List[dict] = []
+        if feed.split_subfeeds_enabled:
+            for role in ("vessel", "vehicle"):
+                layer_id = self._subfeed_layer_id(base_feed_id, role)
+                track = self._layer_manager.track_snapshot(layer_id)
+                if track is None:
+                    continue
+
+                entries.append(
+                    {
+                        "feed_id": base_feed_id,
+                        "feed_name": feed.name,
+                        "role": role,
+                        "track_layer_id": layer_id,
+                        "track": track,
+                    }
+                )
+        else:
+            track = self._layer_manager.track_snapshot(base_feed_id)
+            if track is not None:
+                entries.append(
+                    {
+                        "feed_id": base_feed_id,
+                        "feed_name": feed.name,
+                        "role": "vessel",
+                        "track_layer_id": base_feed_id,
+                        "track": track,
+                    }
+                )
+
+        if not entries:
+            self._on_worker_status(base_feed_id, "warning", "No active tracks available to save")
+            return
+
+        saved_count, file_path = self._layer_manager.save_tracks(
+            entries,
+            planned_number=str(planned_number or "").strip(),
+            actual_number=str(actual_number or "").strip(),
+        )
+        if saved_count <= 0:
+            self._on_worker_status(base_feed_id, "error", "Failed to save tracks")
+            return
+
+        output_name = os.path.basename(file_path) if file_path else "saved_tracks.geojson"
+        self._on_worker_status(
+            base_feed_id,
+            "info",
+            f"Saved {saved_count} track(s) to UDP Nav - Saved Tracks ({output_name})",
+        )
+
+    def set_track_enabled(self, feed_id: str, role: str, enabled: bool) -> None:
+        base_feed_id = str(feed_id or "").strip()
+        if not base_feed_id:
+            return
+
+        feed = self._feeds.get(base_feed_id)
+        if feed is None:
+            return
+
+        selected_role = str(role or "vessel").strip().lower()
+        if selected_role not in _SUBFEED_ROLES:
+            selected_role = "vessel"
+
+        requested_enabled = bool(enabled)
+        changed = False
+
+        if selected_role == "vehicle":
+            if not feed.split_subfeeds_enabled:
+                self._on_worker_status(
+                    base_feed_id,
+                    "warning",
+                    "Vehicle track requires split mode",
+                )
+                self._emit_snapshot()
+                return
+
+            if feed.vehicle_track_enabled != requested_enabled:
+                feed.vehicle_track_enabled = requested_enabled
+                changed = True
+        else:
+            if feed.vessel_track_enabled != requested_enabled:
+                feed.vessel_track_enabled = requested_enabled
+                changed = True
+
+        if not requested_enabled:
+            if selected_role == "vehicle":
+                track_layer_id = self._subfeed_layer_id(base_feed_id, "vehicle")
+            elif feed.split_subfeeds_enabled:
+                track_layer_id = self._subfeed_layer_id(base_feed_id, "vessel")
+            else:
+                track_layer_id = base_feed_id
+            self._layer_manager.clear_track(track_layer_id)
+
+        if changed:
+            self._persist()
+
+        state_text = "enabled" if requested_enabled else "disabled"
+        self._on_worker_status(
+            base_feed_id,
+            "info",
+            f"{selected_role.capitalize()} track {state_text}",
+        )
+        self._emit_snapshot()
 
     def start_feed(self, feed_id: str) -> None:
         if feed_id in self._workers:
@@ -339,16 +455,22 @@ class FeedController(QObject):
         thread.start()
         self._on_worker_status(feed_id, "info", "Starting feed")
 
-    def stop_feed(self, feed_id: str) -> None:
+    def stop_feed(self, feed_id: str, force: bool = False) -> None:
         worker = self._workers.pop(feed_id, None)
         thread = self._threads.pop(feed_id, None)
+
+        if thread is not None:
+            thread.requestInterruption()
 
         if worker is not None:
             QMetaObject.invokeMethod(worker, "stop", _queued_connection_type())
 
         if thread is not None:
             thread.quit()
-            thread.wait(2000)
+            stopped = thread.wait(2500)
+            if force and not stopped:
+                thread.terminate()
+                thread.wait(1000)
             thread.deleteLater()
 
         self._on_worker_status(feed_id, "idle", "Stopped")
@@ -372,8 +494,8 @@ class FeedController(QObject):
                     normalized_source_ids.append(text)
 
         if not enabled:
-            if selected_role == "constellation":
-                if self._keep_center_enabled and self._keep_center_role == "constellation":
+            if selected_role == "group":
+                if self._keep_center_enabled and self._keep_center_role == "group":
                     self._keep_center_enabled = False
                     self._keep_center_feed_id = ""
                     self._keep_center_role = "vessel"
@@ -390,16 +512,16 @@ class FeedController(QObject):
                 self._keep_center_role = "vessel"
             return
 
-        if selected_role == "constellation":
+        if selected_role == "group":
             if not normalized_source_ids:
                 return
 
             self._keep_center_enabled = True
             self._keep_center_feed_id = ""
-            self._keep_center_role = "constellation"
+            self._keep_center_role = "group"
             self._keep_center_source_ids = normalized_source_ids
 
-            center = self._resolve_constellation_center(datetime.now(timezone.utc))
+            center = self._resolve_group_center(datetime.now(timezone.utc))
             if center is not None:
                 self._center_map_on(center[0], center[1])
             return
@@ -415,7 +537,16 @@ class FeedController(QObject):
         self._apply_keep_center_for_feed(feed, datetime.now(timezone.utc))
 
     def shutdown(self) -> None:
-        self.stop_all()
+        self.stop_all(force=True)
+        self._layer_manager.clear()
+        self._latest_heading.clear()
+        self._telemetry_by_layer.clear()
+        self._last_position_by_layer.clear()
+        self._last_vehicle_fix_by_feed.clear()
+        self._keep_center_enabled = False
+        self._keep_center_feed_id = ""
+        self._keep_center_role = "vessel"
+        self._keep_center_source_ids = []
         self._persist()
 
     def log_directory(self) -> str:
@@ -427,12 +558,16 @@ class FeedController(QObject):
     def _initialize_log_dir(self) -> str:
         appdata = os.getenv("APPDATA", "").strip()
         if appdata:
-            log_dir = os.path.join(
+            profile_root = os.path.join(
                 appdata,
                 "QGIS",
                 "QGIS4",
                 "profiles",
                 "default",
+            )
+            log_dir = os.path.join(profile_root, "qgis_udp_nav_logs")
+            legacy_log_dir = os.path.join(
+                profile_root,
                 "python",
                 "plugins",
                 "qgis_udp_nav_plugin",
@@ -444,11 +579,26 @@ class FeedController(QObject):
                 ".qgis_udp_nav_plugin",
                 "logs",
             )
+            legacy_log_dir = ""
 
         try:
             os.makedirs(log_dir, exist_ok=True)
         except OSError:
             return ""
+
+        if legacy_log_dir and os.path.isdir(legacy_log_dir):
+            try:
+                for name in os.listdir(legacy_log_dir):
+                    if not name.lower().endswith(".log"):
+                        continue
+                    source_path = os.path.join(legacy_log_dir, name)
+                    target_path = os.path.join(log_dir, name)
+                    if os.path.exists(target_path):
+                        continue
+                    shutil.copy2(source_path, target_path)
+            except OSError:
+                pass
+
         return log_dir
 
     @staticmethod
@@ -510,6 +660,10 @@ class FeedController(QObject):
                     "heading_source": self._heading_source_for_main_row(feed),
                     "speed_knots": self._speed_knots_for_main_row(feed),
                     "depth_m": self._depth_m_for_main_row(feed),
+                    "track_enabled": self._track_enabled_for_main_row(feed),
+                    "track_dimension": self._track_dimension_for_main_row(feed),
+                    "track_raw_m": self._track_raw_m_for_main_row(feed),
+                    "track_smoothed_m": self._track_smoothed_m_for_main_row(feed),
                 }
             )
             rows.append(base_row)
@@ -673,7 +827,22 @@ class FeedController(QObject):
             event.metadata["heading_true"] = heading_info["is_true"]
 
         if event.valid and event.latitude is not None and event.longitude is not None:
-            self._layer_manager.upsert_position(render_feed, event)
+            track_enabled = self._track_enabled_for_role(feed, role)
+            track_use_depth_3d = role == "vehicle"
+            track_depth_m: Optional[float] = None
+            if track_use_depth_3d:
+                telemetry = self._telemetry_by_layer.get(render_feed.feed_id, {})
+                depth_value = telemetry.get("depth_m")
+                if isinstance(depth_value, (int, float)):
+                    track_depth_m = float(depth_value)
+
+            self._layer_manager.upsert_position(
+                render_feed,
+                event,
+                track_enabled=track_enabled,
+                track_use_depth_3d=track_use_depth_3d,
+                track_depth_m=track_depth_m,
+            )
             self._remember_position(
                 render_feed.feed_id,
                 event.latitude,
@@ -853,7 +1022,7 @@ class FeedController(QObject):
                     status_role,
                     "warning",
                     self._role_prefix(feed, status_role)
-                    + "PSIMSSB head-up coordinates require heading from PSIMSNS or feed config",
+                    + "PSIMSSB head-up coordinates require heading (PSIMSNS, vessel heading, or feed config)",
                 )
                 return None
             return self._forward_starboard_to_offsets(heading, forward_m=y_value, starboard_m=x_value)
@@ -896,7 +1065,7 @@ class FeedController(QObject):
                     status_role,
                     "warning",
                     self._role_prefix(feed, status_role)
-                    + "PSIMSSB head-up polar coordinates require heading from PSIMSNS or feed config",
+                    + "PSIMSSB head-up polar coordinates require heading (PSIMSNS, vessel heading, or feed config)",
                 )
                 return None
 
@@ -962,11 +1131,39 @@ class FeedController(QObject):
         return lat, lon
 
     def _heading_for_feed(self, feed: FeedConfig, heading_feed_id: str) -> Optional[float]:
-        if heading_feed_id in self._latest_heading:
-            heading = self._latest_heading[heading_feed_id].get("heading_deg")
+        candidate_ids: List[str] = []
+
+        def _add_candidate(candidate_id: str) -> None:
+            text = str(candidate_id or "").strip()
+            if text and text not in candidate_ids:
+                candidate_ids.append(text)
+
+        _add_candidate(heading_feed_id)
+        _add_candidate(feed.feed_id)
+
+        if feed.split_subfeeds_enabled:
+            vessel_id = self._subfeed_layer_id(feed.feed_id, "vessel")
+            vehicle_id = self._subfeed_layer_id(feed.feed_id, "vehicle")
+
+            if heading_feed_id == vehicle_id:
+                _add_candidate(vessel_id)
+            elif heading_feed_id == vessel_id:
+                _add_candidate(vehicle_id)
+            else:
+                _add_candidate(vessel_id)
+                _add_candidate(vehicle_id)
+
+        for candidate_id in candidate_ids:
+            heading_state = self._latest_heading.get(candidate_id)
+            if heading_state is None:
+                continue
+            heading = heading_state.get("heading_deg")
             if isinstance(heading, (int, float)):
                 return float(heading)
-        return feed.reference_heading_deg
+
+        if isinstance(feed.reference_heading_deg, (int, float)):
+            return float(feed.reference_heading_deg)
+        return None
 
     def _set_heading(
         self,
@@ -1116,6 +1313,10 @@ class FeedController(QObject):
                 "heading_source": self._heading_source_by_id(row_id),
                 "speed_knots": self._speed_knots_by_id(row_id),
                 "depth_m": self._depth_m_by_id(row_id),
+                "track_enabled": self._track_enabled_for_role(feed, role),
+                "track_dimension": self._track_dimension_for_role(role),
+                "track_raw_m": self._track_raw_m_by_id(row_id),
+                "track_smoothed_m": self._track_smoothed_m_by_id(row_id),
             }
         )
         return row
@@ -1182,6 +1383,66 @@ class FeedController(QObject):
         if telemetry is None:
             return None
         value = telemetry.get("depth_m")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def _track_enabled_for_main_row(self, feed: FeedConfig) -> bool:
+        if feed.split_subfeeds_enabled:
+            return bool(feed.vessel_track_enabled or feed.vehicle_track_enabled)
+        return bool(feed.vessel_track_enabled)
+
+    def _track_dimension_for_main_row(self, feed: FeedConfig) -> str:
+        if feed.split_subfeeds_enabled and not feed.vessel_track_enabled and feed.vehicle_track_enabled:
+            return "3d"
+        return "2d"
+
+    def _track_raw_m_for_main_row(self, feed: FeedConfig) -> Optional[float]:
+        track_id = self._track_id_for_main_row(feed)
+        if not track_id:
+            return None
+        return self._track_raw_m_by_id(track_id)
+
+    def _track_smoothed_m_for_main_row(self, feed: FeedConfig) -> Optional[float]:
+        track_id = self._track_id_for_main_row(feed)
+        if not track_id:
+            return None
+        return self._track_smoothed_m_by_id(track_id)
+
+    def _track_id_for_main_row(self, feed: FeedConfig) -> str:
+        if feed.split_subfeeds_enabled:
+            if feed.vessel_track_enabled:
+                return self._subfeed_layer_id(feed.feed_id, "vessel")
+            if feed.vehicle_track_enabled:
+                return self._subfeed_layer_id(feed.feed_id, "vehicle")
+            return ""
+        if feed.vessel_track_enabled:
+            return feed.feed_id
+        return ""
+
+    def _track_enabled_for_role(self, feed: FeedConfig, role: str) -> bool:
+        if role == "vehicle":
+            return bool(feed.split_subfeeds_enabled and feed.vehicle_track_enabled)
+        return bool(feed.vessel_track_enabled)
+
+    @staticmethod
+    def _track_dimension_for_role(role: str) -> str:
+        return "3d" if role == "vehicle" else "2d"
+
+    def _track_raw_m_by_id(self, feed_id: str) -> Optional[float]:
+        metrics = self._layer_manager.track_metrics(feed_id)
+        if not isinstance(metrics, dict):
+            return None
+        value = metrics.get("raw_m")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def _track_smoothed_m_by_id(self, feed_id: str) -> Optional[float]:
+        metrics = self._layer_manager.track_metrics(feed_id)
+        if not isinstance(metrics, dict):
+            return None
+        value = metrics.get("smoothed_m")
         if isinstance(value, (int, float)):
             return float(value)
         return None
@@ -1452,8 +1713,8 @@ class FeedController(QObject):
     ) -> Optional[Tuple[float, float]]:
         if not self._keep_center_enabled:
             return None
-        if self._keep_center_role == "constellation":
-            return self._resolve_constellation_center(now)
+        if self._keep_center_role == "group":
+            return self._resolve_group_center(now)
         if self._keep_center_feed_id != feed.feed_id:
             return None
 
@@ -1489,7 +1750,7 @@ class FeedController(QObject):
             return None
         return target_position[0], target_position[1]
 
-    def _resolve_constellation_center(self, now: datetime) -> Optional[Tuple[float, float]]:
+    def _resolve_group_center(self, now: datetime) -> Optional[Tuple[float, float]]:
         if not self._keep_center_source_ids:
             return None
 
@@ -1522,7 +1783,7 @@ class FeedController(QObject):
     ) -> bool:
         base_feed_id = str(source_id or "").split(":", 1)[0]
         feed = self._feeds.get(base_feed_id)
-        max_age_sec = _CONSTELLATION_DEFAULT_MAX_AGE_SEC
+        max_age_sec = _GROUP_DEFAULT_MAX_AGE_SEC
         if feed is not None:
             max_age_sec = max(2, int(feed.stale_timeout_sec))
 
@@ -1659,6 +1920,18 @@ class FeedController(QObject):
             fallback_event.metadata["heading_source"] = heading_info.get("source")
             fallback_event.metadata["heading_true"] = heading_info.get("is_true")
 
-        self._layer_manager.upsert_position(vehicle_render, fallback_event)
+        track_depth_m: Optional[float] = None
+        telemetry = self._telemetry_by_layer.get(vehicle_render.feed_id, {})
+        depth_value = telemetry.get("depth_m")
+        if isinstance(depth_value, (int, float)):
+            track_depth_m = float(depth_value)
+
+        self._layer_manager.upsert_position(
+            vehicle_render,
+            fallback_event,
+            track_enabled=self._track_enabled_for_role(feed, "vehicle"),
+            track_use_depth_3d=True,
+            track_depth_m=track_depth_m,
+        )
         self._remember_position(vehicle_render.feed_id, latitude, longitude, fallback_event.received_at)
         return True

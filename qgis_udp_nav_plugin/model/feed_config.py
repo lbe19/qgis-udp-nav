@@ -51,6 +51,8 @@ class FeedConfig:
     split_subfeeds_enabled: bool = False
     split_routing_mode: str = "auto"
     vehicle_show_on_vessel_when_missing_position: bool = False
+    vessel_track_enabled: bool = False
+    vehicle_track_enabled: bool = False
     manual_vessel_sentence_types: list[str] = field(default_factory=list)
     manual_vehicle_sentence_types: list[str] = field(default_factory=list)
     vehicle_icon_path: str = ""
@@ -179,6 +181,8 @@ class FeedConfig:
             "split_subfeeds_enabled": self.split_subfeeds_enabled,
             "split_routing_mode": self.split_routing_mode,
             "vehicle_show_on_vessel_when_missing_position": self.vehicle_show_on_vessel_when_missing_position,
+            "vessel_track_enabled": self.vessel_track_enabled,
+            "vehicle_track_enabled": self.vehicle_track_enabled,
             "manual_vessel_sentence_types": list(self.manual_vessel_sentence_types),
             "manual_vehicle_sentence_types": list(self.manual_vehicle_sentence_types),
             "vehicle_icon_path": self.vehicle_icon_path,
@@ -301,6 +305,8 @@ class FeedConfig:
             vehicle_show_on_vessel_when_missing_position=bool(
                 data.get("vehicle_show_on_vessel_when_missing_position", False)
             ),
+            vessel_track_enabled=bool(data.get("vessel_track_enabled", False)),
+            vehicle_track_enabled=bool(data.get("vehicle_track_enabled", False)),
             manual_vessel_sentence_types=_normalize_sentence_types(
                 data.get("manual_vessel_sentence_types", [])
             ),

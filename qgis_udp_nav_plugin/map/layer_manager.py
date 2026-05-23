@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import hashlib
 import html
 import math
 import os
 import tempfile
-from typing import Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
@@ -14,6 +16,7 @@ from qgis.core import (
     QgsFillSymbol,
     QgsField,
     QgsGeometry,
+    QgsLineSymbol,
     QgsMarkerSymbol,
     QgsPointXY,
     QgsProperty,
@@ -30,16 +33,35 @@ from ..model.events import PositionFixEvent
 
 _OVERVIEW_ARROW_SCALE_THRESHOLD = 25000.0
 _OVERVIEW_ARROW_SIZE_MM = 4.0
+_TRACK_MAX_POINTS = 8000
+_TRACK_SMOOTHING_WINDOW = 5
+_EARTH_RADIUS_M = 6371000.0
+_SAVED_TRACK_LAYER_NAME = "UDP Nav - Saved Tracks"
+_SAVED_TRACKS_FILENAME = "saved_tracks.geojson"
 
 
 class LayerManager:
     def __init__(self) -> None:
         self._layers: Dict[str, QgsVectorLayer] = {}
         self._overview_layers: Dict[str, QgsVectorLayer] = {}
+        self._track_layers: Dict[str, QgsVectorLayer] = {}
+        self._track_points: Dict[str, List[Tuple[float, float, float]]] = {}
+        self._track_lengths: Dict[str, Tuple[float, float]] = {}
+        self._track_dimensions: Dict[str, str] = {}
+        self._track_last_depth: Dict[str, float] = {}
         self._heading_by_feed: Dict[str, float] = {}
         self._position_by_feed: Dict[str, Tuple[float, float]] = {}
+        self._saved_tracks_layer: Optional[QgsVectorLayer] = None
+        self._saved_tracks_file_path: str = ""
 
-    def upsert_position(self, feed: FeedConfig, event: PositionFixEvent) -> None:
+    def upsert_position(
+        self,
+        feed: FeedConfig,
+        event: PositionFixEvent,
+        track_enabled: bool = False,
+        track_use_depth_3d: bool = False,
+        track_depth_m: Optional[float] = None,
+    ) -> None:
         if event.latitude is None or event.longitude is None:
             return
 
@@ -123,6 +145,14 @@ class LayerManager:
         if heading_value is not None and feed.symbol_mode not in {"vessel", "vehicle"}:
             self.update_heading(feed, heading_value)
 
+        self._upsert_track(
+            feed,
+            event,
+            track_enabled=track_enabled,
+            track_use_depth_3d=track_use_depth_3d,
+            track_depth_m=track_depth_m,
+        )
+
         layer.updateExtents()
         layer.triggerRepaint()
 
@@ -137,15 +167,270 @@ class LayerManager:
 
         layer.renderer().setSymbol(self._create_symbol(feed))
         layer.triggerRepaint()
+        self._update_track_style(feed)
 
     def remove_feed(self, feed_id: str) -> None:
         layer = self._layers.pop(feed_id, None)
         self._remove_overview_layer(feed_id)
+        self.clear_track(feed_id)
         self._heading_by_feed.pop(feed_id, None)
         self._position_by_feed.pop(feed_id, None)
         if layer is None:
             return
         QgsProject.instance().removeMapLayer(layer.id())
+
+    def track_metrics(self, feed_id: str) -> Optional[dict]:
+        lengths = self._track_lengths.get(feed_id)
+        points = self._track_points.get(feed_id)
+        if lengths is None or points is None:
+            return None
+
+        return {
+            "raw_m": float(lengths[0]),
+            "smoothed_m": float(lengths[1]),
+            "dimension": self._track_dimensions.get(feed_id, "2d"),
+            "point_count": len(points),
+        }
+
+    def track_snapshot(self, feed_id: str) -> Optional[dict]:
+        lengths = self._track_lengths.get(feed_id)
+        points = self._track_points.get(feed_id)
+        if lengths is None or points is None or len(points) < 2:
+            return None
+
+        return {
+            "feed_id": str(feed_id),
+            "raw_m": float(lengths[0]),
+            "smoothed_m": float(lengths[1]),
+            "dimension": self._track_dimensions.get(feed_id, "2d"),
+            "point_count": len(points),
+            "points": [
+                [float(latitude), float(longitude), float(depth_m)]
+                for latitude, longitude, depth_m in points
+            ],
+        }
+
+    def save_tracks(
+        self,
+        entries: List[dict],
+        planned_number: str,
+        actual_number: str,
+    ) -> Tuple[int, str]:
+        if not entries:
+            return 0, ""
+
+        file_path = self._saved_tracks_path()
+        if not file_path:
+            return 0, ""
+
+        payload = self._load_saved_track_feature_collection(file_path)
+        if payload is None:
+            payload = {"type": "FeatureCollection", "features": []}
+
+        features = payload.get("features")
+        if not isinstance(features, list):
+            features = []
+            payload["features"] = features
+
+        planned_text = str(planned_number or "").strip()
+        actual_text = str(actual_number or "").strip()
+        saved_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+        added_count = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            track = entry.get("track")
+            if not isinstance(track, dict):
+                continue
+
+            points = track.get("points")
+            if not isinstance(points, list) or len(points) < 2:
+                continue
+
+            dimension = str(track.get("dimension") or "2d").strip().lower()
+            use_3d = dimension == "3d"
+
+            coordinates: List[List[float]] = []
+            for point in points:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+
+                latitude = point[0]
+                longitude = point[1]
+                depth_m = point[2] if len(point) > 2 else 0.0
+
+                if not isinstance(latitude, (int, float)):
+                    continue
+                if not isinstance(longitude, (int, float)):
+                    continue
+
+                if use_3d and isinstance(depth_m, (int, float)):
+                    coordinates.append([float(longitude), float(latitude), float(depth_m)])
+                else:
+                    coordinates.append([float(longitude), float(latitude)])
+
+            if len(coordinates) < 2:
+                continue
+
+            raw_m = track.get("raw_m")
+            smoothed_m = track.get("smoothed_m")
+            point_count = track.get("point_count")
+
+            properties = {
+                "saved_at_utc": saved_at_utc,
+                "feed_id": str(entry.get("feed_id") or ""),
+                "feed_name": str(entry.get("feed_name") or ""),
+                "role": str(entry.get("role") or ""),
+                "track_layer_id": str(entry.get("track_layer_id") or ""),
+                "track_dimension": "3d" if use_3d else "2d",
+                "planned_number": planned_text,
+                "actual_number": actual_text,
+                "actual_raw_m": float(raw_m) if isinstance(raw_m, (int, float)) else None,
+                "actual_smoothed_m": (
+                    float(smoothed_m) if isinstance(smoothed_m, (int, float)) else None
+                ),
+                "point_count": int(point_count) if isinstance(point_count, (int, float)) else 0,
+            }
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": coordinates,
+                    },
+                    "properties": properties,
+                }
+            )
+            added_count += 1
+
+        if added_count <= 0:
+            return 0, file_path
+
+        if not self._write_saved_track_feature_collection(file_path, payload):
+            return 0, file_path
+
+        self._ensure_saved_tracks_layer(file_path)
+        return added_count, file_path
+
+    def _saved_tracks_path(self) -> str:
+        if self._saved_tracks_file_path:
+            return self._saved_tracks_file_path
+
+        appdata = os.getenv("APPDATA", "").strip()
+        if appdata:
+            output_dir = os.path.join(
+                appdata,
+                "QGIS",
+                "QGIS4",
+                "profiles",
+                "default",
+                "qgis_udp_nav_tracks",
+            )
+        else:
+            output_dir = os.path.join(
+                os.path.expanduser("~"),
+                ".qgis_udp_nav_plugin",
+                "saved_tracks",
+            )
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError:
+            return ""
+
+        self._saved_tracks_file_path = os.path.join(output_dir, _SAVED_TRACKS_FILENAME)
+        return self._saved_tracks_file_path
+
+    @staticmethod
+    def _load_saved_track_feature_collection(file_path: str) -> Optional[dict]:
+        if not os.path.isfile(file_path):
+            return None
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("type") != "FeatureCollection":
+            return None
+
+        features = payload.get("features")
+        if not isinstance(features, list):
+            payload["features"] = []
+        return payload
+
+    @staticmethod
+    def _write_saved_track_feature_collection(file_path: str, payload: dict) -> bool:
+        temp_path = f"{file_path}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=True, indent=2)
+            os.replace(temp_path, file_path)
+        except OSError:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            return False
+        return True
+
+    def _ensure_saved_tracks_layer(self, file_path: str) -> None:
+        existing = self._saved_tracks_layer
+        if existing is not None and existing.isValid():
+            existing.reload()
+            existing.triggerRepaint()
+            return
+
+        normalized_path = os.path.normpath(file_path)
+        project = QgsProject.instance()
+        for layer in project.mapLayers().values():
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+
+            marked = layer.customProperty("qgis_udp_nav_saved_tracks", 0)
+            marked_text = str(marked).strip().lower()
+            if marked_text in {"1", "true", "yes"}:
+                self._saved_tracks_layer = layer
+                layer.reload()
+                layer.triggerRepaint()
+                return
+
+            try:
+                source_path = os.path.normpath(layer.source().split("|", 1)[0])
+            except Exception:
+                continue
+
+            if source_path == normalized_path:
+                layer.setCustomProperty("qgis_udp_nav_saved_tracks", 1)
+                self._saved_tracks_layer = layer
+                layer.reload()
+                layer.triggerRepaint()
+                return
+
+        layer = QgsVectorLayer(file_path, _SAVED_TRACK_LAYER_NAME, "ogr")
+        if not layer.isValid():
+            return
+
+        layer.setCustomProperty("qgis_udp_nav_saved_tracks", 1)
+        project.addMapLayer(layer)
+        self._saved_tracks_layer = layer
+
+    def clear_track(self, feed_id: str) -> None:
+        layer = self._track_layers.pop(feed_id, None)
+        self._track_points.pop(feed_id, None)
+        self._track_lengths.pop(feed_id, None)
+        self._track_dimensions.pop(feed_id, None)
+        self._track_last_depth.pop(feed_id, None)
+
+        if layer is not None:
+            QgsProject.instance().removeMapLayer(layer.id())
 
     def update_heading(self, feed: FeedConfig, heading_deg: float) -> None:
         layer = self._layers.get(feed.feed_id)
@@ -167,6 +452,15 @@ class LayerManager:
     def clear(self) -> None:
         for feed_id in list(self._layers.keys()):
             self.remove_feed(feed_id)
+
+        for feed_id in list(self._track_layers.keys()):
+            self.clear_track(feed_id)
+
+    @staticmethod
+    def _mark_ephemeral_layer(layer: QgsVectorLayer) -> None:
+        # Prevent QGIS from prompting to save plugin-managed memory layers on exit.
+        layer.setCustomProperty("skipMemoryLayersCheck", 1)
+        layer.setCustomProperty("qgis_udp_nav_ephemeral", 1)
 
     def _ensure_layer(self, feed: FeedConfig) -> QgsVectorLayer:
         layer = self._layers.get(feed.feed_id)
@@ -199,6 +493,7 @@ class LayerManager:
         layer.updateFields()
 
         layer.renderer().setSymbol(self._create_symbol(feed))
+        self._mark_ephemeral_layer(layer)
         QgsProject.instance().addMapLayer(layer)
         self._layers[feed.feed_id] = layer
         return layer
@@ -274,8 +569,38 @@ class LayerManager:
         layer.updateFields()
 
         layer.renderer().setSymbol(self._create_overview_symbol(feed))
+        self._mark_ephemeral_layer(layer)
         QgsProject.instance().addMapLayer(layer, False)
         self._overview_layers[feed.feed_id] = layer
+        return layer
+
+    def _ensure_track_layer(self, feed: FeedConfig) -> QgsVectorLayer:
+        layer = self._track_layers.get(feed.feed_id)
+        if layer is not None:
+            return layer
+
+        layer = QgsVectorLayer(
+            "LineString?crs=EPSG:4326",
+            f"UDP Nav - {feed.name} (track)",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("feed_id", QVariant.String),
+                QgsField("feed_name", QVariant.String),
+                QgsField("raw_m", QVariant.Double),
+                QgsField("smooth_m", QVariant.Double),
+                QgsField("dimension", QVariant.String),
+                QgsField("point_count", QVariant.Int),
+            ]
+        )
+        layer.updateFields()
+
+        layer.renderer().setSymbol(self._create_track_symbol(feed.color_hex))
+        self._mark_ephemeral_layer(layer)
+        QgsProject.instance().addMapLayer(layer)
+        self._track_layers[feed.feed_id] = layer
         return layer
 
     def _remove_overview_layer(self, feed_id: str) -> None:
@@ -283,6 +608,184 @@ class LayerManager:
         if layer is None:
             return
         QgsProject.instance().removeMapLayer(layer.id())
+
+    @staticmethod
+    def _create_track_symbol(color_hex: str) -> QgsLineSymbol:
+        symbol = QgsLineSymbol.createSimple(
+            {
+                "color": str(color_hex or "#ff4500"),
+                "width": "1.2",
+            }
+        )
+        set_opacity = getattr(symbol, "setOpacity", None)
+        if callable(set_opacity):
+            set_opacity(0.85)
+        return symbol
+
+    def _update_track_style(self, feed: FeedConfig) -> None:
+        layer = self._track_layers.get(feed.feed_id)
+        if layer is None:
+            return
+
+        layer.setName(f"UDP Nav - {feed.name} (track)")
+        layer.renderer().setSymbol(self._create_track_symbol(feed.color_hex))
+        layer.triggerRepaint()
+
+    def _upsert_track(
+        self,
+        feed: FeedConfig,
+        event: PositionFixEvent,
+        track_enabled: bool,
+        track_use_depth_3d: bool,
+        track_depth_m: Optional[float],
+    ) -> None:
+        if not track_enabled:
+            self.clear_track(feed.feed_id)
+            return
+
+        latitude = event.latitude
+        longitude = event.longitude
+        if latitude is None or longitude is None:
+            return
+
+        depth_m = self._resolve_track_depth(
+            feed.feed_id,
+            track_use_depth_3d,
+            track_depth_m,
+        )
+
+        points = self._track_points.setdefault(feed.feed_id, [])
+        points.append((float(latitude), float(longitude), depth_m))
+        if len(points) > _TRACK_MAX_POINTS:
+            del points[: len(points) - _TRACK_MAX_POINTS]
+
+        raw_length_m, smoothed_length_m = self._calculate_track_lengths(
+            points,
+            use_depth_3d=track_use_depth_3d,
+        )
+        self._track_lengths[feed.feed_id] = (raw_length_m, smoothed_length_m)
+        self._track_dimensions[feed.feed_id] = "3d" if track_use_depth_3d else "2d"
+
+        layer = self._ensure_track_layer(feed)
+        provider = layer.dataProvider()
+        existing_ids = [feature.id() for feature in layer.getFeatures()]
+        if existing_ids:
+            provider.deleteFeatures(existing_ids)
+
+        if len(points) >= 2:
+            feature = QgsFeature(layer.fields())
+            line = [QgsPointXY(lon, lat) for lat, lon, _depth in points]
+            feature.setGeometry(QgsGeometry.fromPolylineXY(line))
+            feature.setAttributes(
+                [
+                    feed.feed_id,
+                    feed.name,
+                    float(raw_length_m),
+                    float(smoothed_length_m),
+                    self._track_dimensions[feed.feed_id],
+                    len(points),
+                ]
+            )
+            provider.addFeature(feature)
+
+        layer.updateExtents()
+        layer.triggerRepaint()
+
+    def _resolve_track_depth(
+        self,
+        feed_id: str,
+        use_depth_3d: bool,
+        track_depth_m: Optional[float],
+    ) -> float:
+        if not use_depth_3d:
+            return 0.0
+
+        if isinstance(track_depth_m, (int, float)) and math.isfinite(float(track_depth_m)):
+            depth_m = float(track_depth_m)
+            self._track_last_depth[feed_id] = depth_m
+            return depth_m
+
+        previous_depth = self._track_last_depth.get(feed_id)
+        if isinstance(previous_depth, (int, float)):
+            return float(previous_depth)
+        return 0.0
+
+    @staticmethod
+    def _calculate_track_lengths(
+        points: List[Tuple[float, float, float]],
+        use_depth_3d: bool,
+    ) -> Tuple[float, float]:
+        if len(points) < 2:
+            return 0.0, 0.0
+
+        lat0 = points[0][0]
+        lon0 = points[0][1]
+        xyz_points: List[Tuple[float, float, float]] = []
+        for latitude, longitude, depth_m in points:
+            x_m, y_m = LayerManager._latlon_to_local_xy(lat0, lon0, latitude, longitude)
+            z_m = float(depth_m) if use_depth_3d else 0.0
+            xyz_points.append((x_m, y_m, z_m))
+
+        raw_length = LayerManager._polyline_length(xyz_points, use_depth_3d)
+        smoothed_points = LayerManager._smooth_xyz(xyz_points, _TRACK_SMOOTHING_WINDOW)
+        smoothed_length = LayerManager._polyline_length(smoothed_points, use_depth_3d)
+        return raw_length, smoothed_length
+
+    @staticmethod
+    def _latlon_to_local_xy(
+        origin_lat: float,
+        origin_lon: float,
+        latitude: float,
+        longitude: float,
+    ) -> Tuple[float, float]:
+        delta_lat = math.radians(float(latitude) - float(origin_lat))
+        delta_lon = math.radians(float(longitude) - float(origin_lon))
+        x_m = _EARTH_RADIUS_M * delta_lon * math.cos(math.radians(float(origin_lat)))
+        y_m = _EARTH_RADIUS_M * delta_lat
+        return x_m, y_m
+
+    @staticmethod
+    def _polyline_length(points: List[Tuple[float, float, float]], use_depth_3d: bool) -> float:
+        if len(points) < 2:
+            return 0.0
+
+        total = 0.0
+        for index in range(1, len(points)):
+            x0, y0, z0 = points[index - 1]
+            x1, y1, z1 = points[index]
+            dx = x1 - x0
+            dy = y1 - y0
+            dz = (z1 - z0) if use_depth_3d else 0.0
+            total += math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+        return total
+
+    @staticmethod
+    def _smooth_xyz(
+        points: List[Tuple[float, float, float]],
+        window_size: int,
+    ) -> List[Tuple[float, float, float]]:
+        if len(points) <= 2:
+            return list(points)
+
+        size = max(1, int(window_size))
+        if size <= 1:
+            return list(points)
+
+        half_window = size // 2
+        smoothed: List[Tuple[float, float, float]] = []
+        for index in range(len(points)):
+            start = max(0, index - half_window)
+            end = min(len(points), index + half_window + 1)
+            subset = points[start:end]
+            count = float(len(subset))
+
+            avg_x = sum(point[0] for point in subset) / count
+            avg_y = sum(point[1] for point in subset) / count
+            avg_z = sum(point[2] for point in subset) / count
+            smoothed.append((avg_x, avg_y, avg_z))
+
+        return smoothed
 
     def _upsert_overview_marker(
         self,

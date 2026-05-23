@@ -96,6 +96,8 @@ class SettingsStore:
             split_subfeeds_enabled=False,
             split_routing_mode="auto",
             vehicle_show_on_vessel_when_missing_position=False,
+            vessel_track_enabled=False,
+            vehicle_track_enabled=False,
             manual_vessel_sentence_types=[],
             manual_vehicle_sentence_types=[],
             vehicle_icon_path="",
