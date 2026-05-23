@@ -8,6 +8,50 @@ Currently the plugin supports standard NMEA 0183 and Kongsberg HiPAP sentences. 
 
 The plugin includes split vessel/vehicle routing, keep-center map tracking, live telemetry cards (work in progress, might be annoying to use), track recording (x/y and x/y/z, with averaged-out smoothing for a more relevant track distance), and persistent saved-track export with operator metadata.
 
+## Install (From GitHub)
+
+This plugin is currently installed manually from this GitHub repository (not from the QGIS official plugin directory).
+
+### Quick Install (Windows)
+
+1. Clone this repository (or download and extract the ZIP).
+2. Copy the `qgis_udp_nav_plugin` folder into your QGIS profile plugins directory.
+3. Restart QGIS.
+4. Open `Plugins > Manage and Install Plugins...` and enable `QGIS UDP Nav`.
+
+PowerShell example:
+
+```powershell
+git clone https://github.com/lbert1858/qgis-udp-nav.git
+cd qgis-udp-nav
+$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
+Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
+```
+
+### Plugin Folder Location By OS
+
+- Windows: `%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin`
+- Linux: `~/.local/share/QGIS/QGIS4/profiles/default/python/plugins/qgis_udp_nav_plugin`
+- macOS: `~/Library/Application Support/QGIS/QGIS4/profiles/default/python/plugins/qgis_udp_nav_plugin`
+
+### Update To New Version
+
+From your local clone:
+
+```powershell
+git pull
+$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
+Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
+```
+
+Then restart QGIS.
+
+### Uninstall
+
+Delete the plugin folder from your QGIS profile plugins directory, then restart QGIS.
+
 ## Documentation Index
 
 - Full plugin documentation (current state): docs/CURRENT_STATE.md
@@ -255,7 +299,7 @@ Notes:
 - `--speedup` controls how fast virtual time advances relative to wall-clock.
 - Keep QGIS/plugin running while the simulator sends UDP traffic.
 
-### Deploy to Local QGIS Profile (Windows)
+### Developer Redeploy To Local QGIS Profile (Windows)
 
 Example copy-deploy command:
 
