@@ -69,6 +69,23 @@ def test_gll_optional_mode_indicator_supported() -> None:
     assert positions[0].longitude is not None
 
 
+def test_hipap_gll_variants_preserve_talker_identity() -> None:
+    pipeline = SentencePipeline()
+    ingll = _sentence("INGLL,7001.27635,N,02926.13148,E,094202.392,A,D")
+    cpgll = _sentence("CPGLL,,,,,094600.694,V,N")
+
+    events = pipeline.parse_datagram(_feed(), f"{ingll}\n{cpgll}")
+    positions = [event for event in events if isinstance(event, PositionFixEvent)]
+
+    assert len(positions) == 2
+    assert positions[0].sentence_type == "GLL"
+    assert positions[0].talker == "IN"
+    assert positions[0].valid is True
+    assert positions[1].sentence_type == "GLL"
+    assert positions[1].talker == "CP"
+    assert positions[1].valid is False
+
+
 def test_hdt_heading_event_is_parsed() -> None:
     pipeline = SentencePipeline()
     hdt = _sentence("HEHDT,123.4,T")

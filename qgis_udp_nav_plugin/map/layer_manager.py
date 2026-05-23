@@ -31,13 +31,20 @@ from qgis.core import (
 from ..model.feed_config import FeedConfig
 from ..model.events import PositionFixEvent
 
-_OVERVIEW_ARROW_SCALE_THRESHOLD = 25000.0
-_OVERVIEW_ARROW_SIZE_MM = 4.0
+_OVERVIEW_ARROW_SCALE_THRESHOLD = 8189.0
+_OVERVIEW_ARROW_SIZE_MM = 6.0
+_ICON_STYLIZE_SCALE_THRESHOLD = 8189.0
+_ICON_STYLIZE_SIZE_FACTOR = 2.8
+_ICON_STYLIZE_MIN_DELTA = 1.8
 _TRACK_MAX_POINTS = 8000
 _TRACK_SMOOTHING_WINDOW = 5
 _EARTH_RADIUS_M = 6371000.0
+_TRACK_LINE_WIDTH_MM = 1.2
 _SAVED_TRACK_LAYER_NAME = "UDP Nav - Saved Tracks"
 _SAVED_TRACKS_FILENAME = "saved_tracks.geojson"
+_SAVED_TRACK_COLOR_HEX = "#36454F"
+_SAVED_TRACK_VESSEL_FALLBACK_HEX = "#8f5f3b"
+_SAVED_TRACK_VEHICLE_FALLBACK_HEX = "#2f5f73"
 
 
 class LayerManager:
@@ -53,6 +60,73 @@ class LayerManager:
         self._position_by_feed: Dict[str, Tuple[float, float]] = {}
         self._saved_tracks_layer: Optional[QgsVectorLayer] = None
         self._saved_tracks_file_path: str = ""
+
+    @staticmethod
+    def _layer_id(layer: Optional[QgsVectorLayer]) -> str:
+        if layer is None:
+            return ""
+
+        try:
+            return str(layer.id() or "")
+        except RuntimeError:
+            return ""
+
+    @staticmethod
+    def _is_layer_alive(layer: Optional[QgsVectorLayer]) -> bool:
+        layer_id = LayerManager._layer_id(layer)
+        if not layer_id:
+            return False
+
+        if QgsProject.instance().mapLayer(layer_id) is None:
+            return False
+
+        try:
+            return bool(layer.isValid())
+        except RuntimeError:
+            return False
+
+    def _cached_layer(
+        self,
+        cache: Dict[str, QgsVectorLayer],
+        cache_key: str,
+    ) -> Optional[QgsVectorLayer]:
+        layer = cache.get(cache_key)
+        if self._is_layer_alive(layer):
+            return layer
+
+        cache.pop(cache_key, None)
+        return None
+
+    @staticmethod
+    def _remove_layer_from_project(layer: Optional[QgsVectorLayer]) -> None:
+        layer_id = LayerManager._layer_id(layer)
+        if not layer_id:
+            return
+
+        project = QgsProject.instance()
+        if project.mapLayer(layer_id) is None:
+            return
+
+        project.removeMapLayer(layer_id)
+
+    def reset_project_layer_caches(self) -> None:
+        self._layers.clear()
+        self._overview_layers.clear()
+        self._track_layers.clear()
+        self._saved_tracks_layer = None
+
+    def prune_dead_layer_caches(self) -> None:
+        for cache_key in list(self._layers.keys()):
+            self._cached_layer(self._layers, cache_key)
+
+        for cache_key in list(self._overview_layers.keys()):
+            self._cached_layer(self._overview_layers, cache_key)
+
+        for cache_key in list(self._track_layers.keys()):
+            self._cached_layer(self._track_layers, cache_key)
+
+        if not self._is_layer_alive(self._saved_tracks_layer):
+            self._saved_tracks_layer = None
 
     def upsert_position(
         self,
@@ -170,14 +244,13 @@ class LayerManager:
         self._update_track_style(feed)
 
     def remove_feed(self, feed_id: str) -> None:
-        layer = self._layers.pop(feed_id, None)
+        layer = self._cached_layer(self._layers, feed_id)
+        self._layers.pop(feed_id, None)
         self._remove_overview_layer(feed_id)
         self.clear_track(feed_id)
         self._heading_by_feed.pop(feed_id, None)
         self._position_by_feed.pop(feed_id, None)
-        if layer is None:
-            return
-        QgsProject.instance().removeMapLayer(layer.id())
+        self._remove_layer_from_project(layer)
 
     def track_metrics(self, feed_id: str) -> Optional[dict]:
         lengths = self._track_lengths.get(feed_id)
@@ -215,6 +288,7 @@ class LayerManager:
         entries: List[dict],
         planned_number: str,
         actual_number: str,
+        refresh_saved_layer: bool = True,
     ) -> Tuple[int, str]:
         if not entries:
             return 0, ""
@@ -277,14 +351,22 @@ class LayerManager:
             raw_m = track.get("raw_m")
             smoothed_m = track.get("smoothed_m")
             point_count = track.get("point_count")
+            role_text = str(entry.get("role") or "").strip().lower()
+            base_color_hex = self._normalize_color_hex(
+                str(entry.get("track_color_hex") or "").strip(),
+                fallback=_SAVED_TRACK_COLOR_HEX,
+            )
+            saved_color_hex = self._saved_track_color_hex(base_color_hex)
 
             properties = {
                 "saved_at_utc": saved_at_utc,
                 "feed_id": str(entry.get("feed_id") or ""),
                 "feed_name": str(entry.get("feed_name") or ""),
-                "role": str(entry.get("role") or ""),
+                "role": role_text,
                 "track_layer_id": str(entry.get("track_layer_id") or ""),
                 "track_dimension": "3d" if use_3d else "2d",
+                "track_color_hex": base_color_hex,
+                "saved_color_hex": saved_color_hex,
                 "planned_number": planned_text,
                 "actual_number": actual_text,
                 "actual_raw_m": float(raw_m) if isinstance(raw_m, (int, float)) else None,
@@ -310,10 +392,69 @@ class LayerManager:
             return 0, file_path
 
         if not self._write_saved_track_feature_collection(file_path, payload):
-            return 0, file_path
+            # Windows can hold an exclusive lock while the OGR layer is loaded.
+            self._release_saved_tracks_layer_locks(file_path)
+            if not self._write_saved_track_feature_collection(file_path, payload):
+                return 0, file_path
 
-        self._ensure_saved_tracks_layer(file_path)
+        if refresh_saved_layer:
+            self._ensure_saved_tracks_layer(file_path)
         return added_count, file_path
+
+    @staticmethod
+    def _normalize_color_hex(color_hex: str, fallback: str) -> str:
+        color = QColor(str(color_hex or "").strip())
+        if color.isValid():
+            return str(color.name())
+
+        fallback_color = QColor(str(fallback or "").strip())
+        if fallback_color.isValid():
+            return str(fallback_color.name())
+        return "#666666"
+
+    @staticmethod
+    def _saved_track_color_hex(base_color_hex: str) -> str:
+        color = QColor(str(base_color_hex or "").strip())
+        if not color.isValid():
+            color = QColor(_SAVED_TRACK_COLOR_HEX)
+
+        if color.lightnessF() <= 0.30:
+            return str(color.lighter(120).name())
+        return str(color.darker(145).name())
+
+    @staticmethod
+    def _is_saved_tracks_project_layer(layer: QgsVectorLayer, normalized_path: str) -> bool:
+        marked = layer.customProperty("qgis_udp_nav_saved_tracks", 0)
+        marked_text = str(marked).strip().lower()
+        if marked_text in {"1", "true", "yes"}:
+            return True
+
+        try:
+            source_path = os.path.normpath(layer.source().split("|", 1)[0])
+        except Exception:
+            return False
+        return source_path == normalized_path
+
+    def _release_saved_tracks_layer_locks(self, file_path: str) -> None:
+        normalized_path = os.path.normpath(file_path)
+        project = QgsProject.instance()
+        layer_ids: List[str] = []
+
+        for layer in project.mapLayers().values():
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+            if not self._is_saved_tracks_project_layer(layer, normalized_path):
+                continue
+
+            layer_id = self._layer_id(layer)
+            if layer_id:
+                layer_ids.append(layer_id)
+
+        for layer_id in layer_ids:
+            if project.mapLayer(layer_id) is not None:
+                project.removeMapLayer(layer_id)
+
+        self._saved_tracks_layer = None
 
     def _saved_tracks_path(self) -> str:
         if self._saved_tracks_file_path:
@@ -370,7 +511,7 @@ class LayerManager:
         temp_path = f"{file_path}.tmp"
         try:
             with open(temp_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=True, indent=2)
+                json.dump(payload, handle, ensure_ascii=True, separators=(",", ":"))
             os.replace(temp_path, file_path)
         except OSError:
             try:
@@ -383,8 +524,13 @@ class LayerManager:
 
     def _ensure_saved_tracks_layer(self, file_path: str) -> None:
         existing = self._saved_tracks_layer
-        if existing is not None and existing.isValid():
+        if not self._is_layer_alive(existing):
+            self._saved_tracks_layer = None
+            existing = None
+
+        if existing is not None:
             existing.reload()
+            self._style_saved_tracks_layer(existing)
             existing.triggerRepaint()
             return
 
@@ -399,6 +545,7 @@ class LayerManager:
             if marked_text in {"1", "true", "yes"}:
                 self._saved_tracks_layer = layer
                 layer.reload()
+                self._style_saved_tracks_layer(layer)
                 layer.triggerRepaint()
                 return
 
@@ -411,6 +558,7 @@ class LayerManager:
                 layer.setCustomProperty("qgis_udp_nav_saved_tracks", 1)
                 self._saved_tracks_layer = layer
                 layer.reload()
+                self._style_saved_tracks_layer(layer)
                 layer.triggerRepaint()
                 return
 
@@ -421,19 +569,34 @@ class LayerManager:
         layer.setCustomProperty("qgis_udp_nav_saved_tracks", 1)
         project.addMapLayer(layer)
         self._saved_tracks_layer = layer
+        self._style_saved_tracks_layer(layer)
+
+    def refresh_saved_tracks_layer(self) -> None:
+        file_path = self._saved_tracks_path()
+        if not file_path or not os.path.isfile(file_path):
+            return
+
+        self._ensure_saved_tracks_layer(file_path)
+
+    def _style_saved_tracks_layer(self, layer: QgsVectorLayer) -> None:
+        renderer = layer.renderer()
+        if renderer is None:
+            return
+
+        renderer.setSymbol(self._create_saved_track_symbol())
 
     def clear_track(self, feed_id: str) -> None:
-        layer = self._track_layers.pop(feed_id, None)
+        layer = self._cached_layer(self._track_layers, feed_id)
+        self._track_layers.pop(feed_id, None)
         self._track_points.pop(feed_id, None)
         self._track_lengths.pop(feed_id, None)
         self._track_dimensions.pop(feed_id, None)
         self._track_last_depth.pop(feed_id, None)
 
-        if layer is not None:
-            QgsProject.instance().removeMapLayer(layer.id())
+        self._remove_layer_from_project(layer)
 
     def update_heading(self, feed: FeedConfig, heading_deg: float) -> None:
-        layer = self._layers.get(feed.feed_id)
+        layer = self._cached_layer(self._layers, feed.feed_id)
         normalized = self._normalize_heading(heading_deg)
         self._heading_by_feed[feed.feed_id] = normalized
 
@@ -463,16 +626,25 @@ class LayerManager:
         layer.setCustomProperty("qgis_udp_nav_ephemeral", 1)
 
     def _ensure_layer(self, feed: FeedConfig) -> QgsVectorLayer:
-        layer = self._layers.get(feed.feed_id)
+        layer = self._cached_layer(self._layers, feed.feed_id)
         wants_polygon = feed.symbol_mode in {"vessel", "vehicle"}
 
         if layer is not None:
-            is_polygon = QgsWkbTypes.geometryType(layer.wkbType()) == QgsWkbTypes.PolygonGeometry
-            if is_polygon == wants_polygon:
-                return layer
+            try:
+                is_polygon = (
+                    QgsWkbTypes.geometryType(layer.wkbType())
+                    == QgsWkbTypes.PolygonGeometry
+                )
+            except RuntimeError:
+                layer = None
+                self._layers.pop(feed.feed_id, None)
 
-            QgsProject.instance().removeMapLayer(layer.id())
-            self._layers.pop(feed.feed_id, None)
+            if layer is not None:
+                if is_polygon == wants_polygon:
+                    return layer
+
+                self._remove_layer_from_project(layer)
+                self._layers.pop(feed.feed_id, None)
 
         layer_uri = "Polygon?crs=EPSG:4326" if wants_polygon else "Point?crs=EPSG:4326"
         layer = QgsVectorLayer(layer_uri, f"UDP Nav - {feed.name}", "memory")
@@ -512,12 +684,13 @@ class LayerManager:
         marker_name = feed.qgis_symbol_name or "circle"
         qgis_width = max(0.1, float(feed.qgis_symbol_width))
         qgis_height = max(0.1, float(feed.qgis_symbol_height))
+        marker_base_size = max(qgis_width, qgis_height)
         render_unit = self._render_unit_for_feed(feed)
         symbol = QgsMarkerSymbol.createSimple(
             {
                 "name": marker_name,
                 "color": feed.color_hex,
-                "size": f"{max(qgis_width, qgis_height):.3f}",
+                "size": f"{marker_base_size:.3f}",
                 "outline_color": "#1f1f1f",
                 "outline_width": "0.4",
             }
@@ -534,22 +707,35 @@ class LayerManager:
         elif feed.symbol_mode == "icon_file":
             if feed.icon_path and feed.icon_path.lower().endswith(".svg"):
                 svg_layer = QgsSvgMarkerSymbolLayer(feed.icon_path, 7.0)
-                self._apply_svg_symbol_layer(symbol, svg_layer, fill_color=feed.color_hex)
+                self._apply_svg_symbol_layer(
+                    symbol,
+                    svg_layer,
+                    size=max(qgis_width, qgis_height),
+                    render_unit=render_unit,
+                    fill_color=feed.color_hex,
+                )
 
         elif feed.symbol_mode == "unicode":
             unicode_svg = self._unicode_svg_path(feed)
             if unicode_svg is not None:
                 svg_layer = QgsSvgMarkerSymbolLayer(unicode_svg, 7.0)
-                self._apply_svg_symbol_layer(symbol, svg_layer)
+                self._apply_svg_symbol_layer(
+                    symbol,
+                    svg_layer,
+                    size=max(qgis_width, qgis_height),
+                    render_unit=render_unit,
+                )
 
         heading = self._heading_by_feed.get(feed.feed_id)
         if heading is not None:
             self._apply_heading_to_symbol(symbol, heading)
 
+        self._apply_marker_symbol_scaling(symbol, marker_base_size)
+
         return symbol
 
     def _ensure_overview_layer(self, feed: FeedConfig) -> QgsVectorLayer:
-        layer = self._overview_layers.get(feed.feed_id)
+        layer = self._cached_layer(self._overview_layers, feed.feed_id)
         if layer is not None:
             return layer
 
@@ -575,7 +761,7 @@ class LayerManager:
         return layer
 
     def _ensure_track_layer(self, feed: FeedConfig) -> QgsVectorLayer:
-        layer = self._track_layers.get(feed.feed_id)
+        layer = self._cached_layer(self._track_layers, feed.feed_id)
         if layer is not None:
             return layer
 
@@ -604,17 +790,16 @@ class LayerManager:
         return layer
 
     def _remove_overview_layer(self, feed_id: str) -> None:
-        layer = self._overview_layers.pop(feed_id, None)
-        if layer is None:
-            return
-        QgsProject.instance().removeMapLayer(layer.id())
+        layer = self._cached_layer(self._overview_layers, feed_id)
+        self._overview_layers.pop(feed_id, None)
+        self._remove_layer_from_project(layer)
 
     @staticmethod
     def _create_track_symbol(color_hex: str) -> QgsLineSymbol:
         symbol = QgsLineSymbol.createSimple(
             {
                 "color": str(color_hex or "#ff4500"),
-                "width": "1.2",
+                "width": f"{_TRACK_LINE_WIDTH_MM:.2f}",
             }
         )
         set_opacity = getattr(symbol, "setOpacity", None)
@@ -622,8 +807,37 @@ class LayerManager:
             set_opacity(0.85)
         return symbol
 
+    @staticmethod
+    def _create_saved_track_symbol() -> QgsLineSymbol:
+        symbol = QgsLineSymbol.createSimple(
+            {
+                "color": _SAVED_TRACK_COLOR_HEX,
+                "width": f"{_TRACK_LINE_WIDTH_MM:.2f}",
+            }
+        )
+        set_opacity = getattr(symbol, "setOpacity", None)
+        if callable(set_opacity):
+            set_opacity(0.95)
+
+        symbol_layer = symbol.symbolLayer(0)
+        set_property = getattr(symbol_layer, "setDataDefinedProperty", None)
+        color_property = LayerManager._symbol_property("PropertyStrokeColor")
+        if color_property is None:
+            color_property = LayerManager._symbol_property("PropertyColor")
+        if symbol_layer is not None and color_property is not None and callable(set_property):
+            expression = (
+                f'coalesce("saved_color_hex", '
+                "CASE "
+                f'WHEN lower("role") = \'vehicle\' THEN \'{_SAVED_TRACK_VEHICLE_FALLBACK_HEX}\' '
+                f'WHEN lower("role") = \'vessel\' THEN \'{_SAVED_TRACK_VESSEL_FALLBACK_HEX}\' '
+                f"ELSE '{_SAVED_TRACK_COLOR_HEX}' END)"
+            )
+            set_property(color_property, QgsProperty.fromExpression(expression))
+
+        return symbol
+
     def _update_track_style(self, feed: FeedConfig) -> None:
-        layer = self._track_layers.get(feed.feed_id)
+        layer = self._cached_layer(self._track_layers, feed.feed_id)
         if layer is None:
             return
 
@@ -819,7 +1033,7 @@ class LayerManager:
         layer.triggerRepaint()
 
     def _update_overview_heading(self, feed_id: str, heading_deg: float) -> None:
-        layer = self._overview_layers.get(feed_id)
+        layer = self._cached_layer(self._overview_layers, feed_id)
         if layer is None:
             return
         self._apply_heading_to_layer(layer, heading_deg)
@@ -859,7 +1073,7 @@ class LayerManager:
             if size_property is not None and callable(set_property):
                 expression = (
                     "CASE "
-                    f"WHEN @map_scale >= {_OVERVIEW_ARROW_SCALE_THRESHOLD:.0f} "
+                    f"WHEN @map_scale > {_OVERVIEW_ARROW_SCALE_THRESHOLD:.0f} "
                     f"THEN {_OVERVIEW_ARROW_SIZE_MM:.2f} "
                     "ELSE 0 "
                     "END"
@@ -900,7 +1114,7 @@ class LayerManager:
         return heading
 
     def _refresh_vessel_geometry(self, feed: FeedConfig) -> None:
-        layer = self._layers.get(feed.feed_id)
+        layer = self._cached_layer(self._layers, feed.feed_id)
         position = self._position_by_feed.get(feed.feed_id)
         if layer is None or position is None:
             return
@@ -1100,10 +1314,26 @@ class LayerManager:
     def _apply_svg_symbol_layer(
         symbol: QgsMarkerSymbol,
         svg_layer: QgsSvgMarkerSymbolLayer,
+        size: float,
+        render_unit,
         fill_color: Optional[str] = None,
     ) -> None:
         if not LayerManager._svg_layer_is_usable(svg_layer):
             return
+
+        base_size = max(0.1, float(size))
+
+        set_size = getattr(svg_layer, "setSize", None)
+        if callable(set_size):
+            set_size(base_size)
+
+        set_output_unit = getattr(svg_layer, "setOutputUnit", None)
+        if callable(set_output_unit):
+            set_output_unit(render_unit)
+
+        set_size_unit = getattr(svg_layer, "setSizeUnit", None)
+        if callable(set_size_unit):
+            set_size_unit(render_unit)
 
         if fill_color:
             set_fill_color = getattr(svg_layer, "setFillColor", None)
@@ -1117,6 +1347,16 @@ class LayerManager:
             symbol.changeSymbolLayer(0, svg_layer)
         except (TypeError, ValueError):
             return
+
+        size_property = LayerManager._symbol_property("PropertySize")
+        set_property = getattr(svg_layer, "setDataDefinedProperty", None)
+        if size_property is not None and callable(set_property):
+            set_property(
+                size_property,
+                QgsProperty.fromExpression(
+                    LayerManager._stylized_size_expression(base_size)
+                ),
+            )
 
     @staticmethod
     def _svg_layer_is_usable(svg_layer: QgsSvgMarkerSymbolLayer) -> bool:
@@ -1159,15 +1399,66 @@ class LayerManager:
 
         width_property = LayerManager._symbol_property("PropertyWidth")
         height_property = LayerManager._symbol_property("PropertyHeight")
-        if width_property is None or height_property is None:
-            return
 
         set_property = getattr(symbol_layer, "setDataDefinedProperty", None)
         if not callable(set_property):
             return
 
-        set_property(width_property, QgsProperty.fromValue(float(width)))
-        set_property(height_property, QgsProperty.fromValue(float(height)))
+        width_expression = LayerManager._stylized_size_expression(float(width))
+        height_expression = LayerManager._stylized_size_expression(float(height))
+
+        if width_property is not None and height_property is not None:
+            set_property(width_property, QgsProperty.fromExpression(width_expression))
+            set_property(height_property, QgsProperty.fromExpression(height_expression))
+            return
+
+        size_property = LayerManager._symbol_property("PropertySize")
+        if size_property is None:
+            return
+
+        fallback_size = max(float(width), float(height))
+        set_property(
+            size_property,
+            QgsProperty.fromExpression(
+                LayerManager._stylized_size_expression(fallback_size)
+            ),
+        )
+
+    @staticmethod
+    def _apply_marker_symbol_scaling(symbol: QgsMarkerSymbol, base_size: float) -> None:
+        expression = LayerManager._stylized_size_expression(base_size)
+
+        set_data_defined_size = getattr(symbol, "setDataDefinedSize", None)
+        if callable(set_data_defined_size):
+            try:
+                set_data_defined_size(QgsProperty.fromExpression(expression))
+                return
+            except TypeError:
+                pass
+
+        symbol_layer = symbol.symbolLayer(0)
+        if symbol_layer is None:
+            return
+
+        size_property = LayerManager._symbol_property("PropertySize")
+        set_property = getattr(symbol_layer, "setDataDefinedProperty", None)
+        if size_property is not None and callable(set_property):
+            set_property(size_property, QgsProperty.fromExpression(expression))
+
+    @staticmethod
+    def _stylized_size_expression(base_size: float) -> str:
+        true_size = max(0.1, float(base_size))
+        stylized_size = max(
+            true_size * _ICON_STYLIZE_SIZE_FACTOR,
+            true_size + _ICON_STYLIZE_MIN_DELTA,
+        )
+        return (
+            "CASE "
+            f"WHEN @map_scale > {_ICON_STYLIZE_SCALE_THRESHOLD:.0f} "
+            f"THEN {stylized_size:.3f} "
+            f"ELSE {true_size:.3f} "
+            "END"
+        )
 
     @staticmethod
     def _render_unit_for_feed(feed: FeedConfig):

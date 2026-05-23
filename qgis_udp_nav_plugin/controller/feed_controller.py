@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 import math
 import os
 import shutil
+import time
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from qgis.PyQt.QtCore import QMetaObject, QObject, Qt, QThread, pyqtSignal
+from qgis.PyQt.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -34,9 +35,12 @@ _AUTO_VESSEL_SENTENCE_TYPES = {
     "VHW",
 }
 _AUTO_VEHICLE_SENTENCE_TYPES = {"PSIMSSB", "PSIMSNS"}
+_AUTO_VEHICLE_GLL_TALKERS = {"IN", "CP"}
 _SUBFEED_ROLES = {"vessel", "vehicle"}
 _KEEP_CENTER_MODES = {"vessel", "vehicle", "group"}
 _GROUP_DEFAULT_MAX_AGE_SEC = 15
+_LIVE_SNAPSHOT_MIN_INTERVAL_SEC = 0.2
+_AUTO_SAVE_LAYER_REFRESH_DEBOUNCE_MS = 300
 
 
 def _queued_connection_type():
@@ -68,13 +72,23 @@ class FeedController(QObject):
         self._telemetry_by_layer: Dict[str, Dict[str, object]] = {}
         self._last_position_by_layer: Dict[str, Tuple[float, float, datetime]] = {}
         self._last_vehicle_fix_by_feed: Dict[str, datetime] = {}
+        self._vehicle_fallback_active_by_feed: Dict[str, bool] = {}
         self._workers: Dict[str, UdpFeedWorker] = {}
         self._threads: Dict[str, QThread] = {}
+        self._shutting_down = False
+        self._project_transition_active = False
+        self._project_transition_resume_feed_ids: List[str] = []
+        self._last_live_snapshot_monotonic = 0.0
         self._keep_center_enabled = False
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
         self._keep_center_source_ids: List[str] = []
+        self._saved_tracks_refresh_timer = QTimer(self)
+        self._saved_tracks_refresh_timer.setSingleShot(True)
+        self._saved_tracks_refresh_timer.setInterval(_AUTO_SAVE_LAYER_REFRESH_DEBOUNCE_MS)
+        self._saved_tracks_refresh_timer.timeout.connect(self._refresh_saved_tracks_layer)
         self._log_dir = self._initialize_log_dir()
+        self._startup_mode = self._settings.load_startup_mode()
 
         for feed in self._feeds.values():
             self._sync_status_slots(feed)
@@ -87,6 +101,62 @@ class FeedController(QObject):
 
     def vessel_profiles(self) -> Dict[str, dict]:
         return {name: dict(profile) for name, profile in self._vessel_profiles.items()}
+
+    def startup_mode(self) -> str:
+        return str(self._startup_mode)
+
+    def set_startup_mode(self, mode: str) -> None:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"off", "first", "all"}:
+            normalized = "first"
+
+        if normalized == self._startup_mode:
+            return
+
+        self._startup_mode = normalized
+        self._settings.save_startup_mode(normalized)
+
+    def project_transition_active(self) -> bool:
+        return bool(self._project_transition_active)
+
+    def project_transition_started(self) -> None:
+        if self._shutting_down:
+            return
+
+        if self._project_transition_active:
+            self._layer_manager.reset_project_layer_caches()
+            self._last_position_by_layer.clear()
+            return
+
+        self._project_transition_active = True
+        self._project_transition_resume_feed_ids = list(self._workers.keys())
+        self._layer_manager.reset_project_layer_caches()
+        self._last_position_by_layer.clear()
+
+        if self._project_transition_resume_feed_ids:
+            self.stop_all(force=True)
+
+    def project_transition_completed(self) -> None:
+        if self._shutting_down:
+            return
+        if not self._project_transition_active:
+            return
+
+        self._project_transition_active = False
+        self._layer_manager.reset_project_layer_caches()
+        self._last_position_by_layer.clear()
+
+        resume_ids = [
+            feed_id
+            for feed_id in self._project_transition_resume_feed_ids
+            if feed_id in self._feeds and bool(self._feeds[feed_id].enabled)
+        ]
+        self._project_transition_resume_feed_ids = []
+
+        for feed_id in resume_ids:
+            self.start_feed(feed_id)
+
+        self._emit_snapshot()
 
     def set_vessel_profiles(self, profiles: dict) -> None:
         safe_profiles: Dict[str, dict] = {}
@@ -340,6 +410,7 @@ class FeedController(QObject):
                         "feed_name": feed.name,
                         "role": role,
                         "track_layer_id": layer_id,
+                        "track_color_hex": self._track_color_for_role(feed, role),
                         "track": track,
                     }
                 )
@@ -352,6 +423,7 @@ class FeedController(QObject):
                         "feed_name": feed.name,
                         "role": "vessel",
                         "track_layer_id": base_feed_id,
+                        "track_color_hex": self._track_color_for_role(feed, "vessel"),
                         "track": track,
                     }
                 )
@@ -390,8 +462,6 @@ class FeedController(QObject):
             selected_role = "vessel"
 
         requested_enabled = bool(enabled)
-        changed = False
-
         if selected_role == "vehicle":
             if not feed.split_subfeeds_enabled:
                 self._on_worker_status(
@@ -402,35 +472,103 @@ class FeedController(QObject):
                 self._emit_snapshot()
                 return
 
-            if feed.vehicle_track_enabled != requested_enabled:
-                feed.vehicle_track_enabled = requested_enabled
-                changed = True
+            current_enabled = bool(feed.vehicle_track_enabled)
+            track_layer_id = self._subfeed_layer_id(base_feed_id, "vehicle")
         else:
-            if feed.vessel_track_enabled != requested_enabled:
-                feed.vessel_track_enabled = requested_enabled
-                changed = True
-
-        if not requested_enabled:
-            if selected_role == "vehicle":
-                track_layer_id = self._subfeed_layer_id(base_feed_id, "vehicle")
-            elif feed.split_subfeeds_enabled:
+            current_enabled = bool(feed.vessel_track_enabled)
+            if feed.split_subfeeds_enabled:
                 track_layer_id = self._subfeed_layer_id(base_feed_id, "vessel")
             else:
                 track_layer_id = base_feed_id
+
+        changed = False
+
+        if not requested_enabled:
+            auto_saved_output = ""
+            track_snapshot = self._layer_manager.track_snapshot(track_layer_id)
+            if track_snapshot is not None:
+                saved_count, file_path = self._layer_manager.save_tracks(
+                    [
+                        {
+                            "feed_id": base_feed_id,
+                            "feed_name": feed.name,
+                            "role": selected_role,
+                            "track_layer_id": track_layer_id,
+                            "track_color_hex": self._track_color_for_role(feed, selected_role),
+                            "track": track_snapshot,
+                        }
+                    ],
+                    planned_number="",
+                    actual_number="",
+                    refresh_saved_layer=False,
+                )
+                if saved_count <= 0:
+                    self._on_worker_status(
+                        base_feed_id,
+                        "error",
+                        f"Failed to auto-save {selected_role} track; track remains active",
+                    )
+                    self._emit_snapshot()
+                    return
+
+                auto_saved_output = (
+                    os.path.basename(file_path) if file_path else "saved_tracks.geojson"
+                )
+                self._schedule_saved_tracks_refresh()
+
             self._layer_manager.clear_track(track_layer_id)
+
+            if current_enabled:
+                if selected_role == "vehicle":
+                    feed.vehicle_track_enabled = False
+                else:
+                    feed.vessel_track_enabled = False
+                changed = True
+
+            if changed:
+                self._persist()
+
+            if auto_saved_output:
+                message = (
+                    f"{selected_role.capitalize()} track disabled "
+                    f"(auto-saved to {auto_saved_output})"
+                )
+            else:
+                message = f"{selected_role.capitalize()} track disabled"
+
+            self._on_worker_status(base_feed_id, "info", message)
+            self._emit_snapshot()
+            return
+
+        if not current_enabled:
+            if selected_role == "vehicle":
+                feed.vehicle_track_enabled = True
+            else:
+                feed.vessel_track_enabled = True
+            changed = True
 
         if changed:
             self._persist()
 
-        state_text = "enabled" if requested_enabled else "disabled"
         self._on_worker_status(
             base_feed_id,
             "info",
-            f"{selected_role.capitalize()} track {state_text}",
+            f"{selected_role.capitalize()} track enabled",
         )
         self._emit_snapshot()
 
+    def _schedule_saved_tracks_refresh(self) -> None:
+        if self._saved_tracks_refresh_timer.isActive():
+            self._saved_tracks_refresh_timer.stop()
+        self._saved_tracks_refresh_timer.start()
+
+    def _refresh_saved_tracks_layer(self) -> None:
+        self._layer_manager.refresh_saved_tracks_layer()
+
     def start_feed(self, feed_id: str) -> None:
+        if self._shutting_down or self._project_transition_active:
+            return
+
         if feed_id in self._workers:
             return
 
@@ -443,10 +581,11 @@ class FeedController(QObject):
         worker.moveToThread(thread)
 
         thread.started.connect(worker.start)
-        worker.event_received.connect(self._on_worker_event)
-        worker.sentence_received.connect(self._on_worker_sentence)
-        worker.status.connect(self._on_worker_status)
-        worker.stopped.connect(self._on_worker_stopped)
+        connection_type = _queued_connection_type()
+        worker.event_received.connect(self._on_worker_event, connection_type)
+        worker.sentence_received.connect(self._on_worker_sentence, connection_type)
+        worker.status.connect(self._on_worker_status, connection_type)
+        worker.stopped.connect(self._on_worker_stopped, connection_type)
         thread.finished.connect(worker.deleteLater)
 
         self._threads[feed_id] = thread
@@ -537,12 +676,16 @@ class FeedController(QObject):
         self._apply_keep_center_for_feed(feed, datetime.now(timezone.utc))
 
     def shutdown(self) -> None:
+        self._shutting_down = True
+        self._project_transition_active = False
+        self._project_transition_resume_feed_ids = []
         self.stop_all(force=True)
         self._layer_manager.clear()
         self._latest_heading.clear()
         self._telemetry_by_layer.clear()
         self._last_position_by_layer.clear()
         self._last_vehicle_fix_by_feed.clear()
+        self._vehicle_fallback_active_by_feed.clear()
         self._keep_center_enabled = False
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
@@ -677,6 +820,15 @@ class FeedController(QObject):
     def _emit_snapshot(self) -> None:
         self.snapshot_changed.emit(self.snapshot_rows())
 
+    def _emit_live_snapshot(self) -> None:
+        now = time.monotonic()
+        if (now - self._last_live_snapshot_monotonic) < _LIVE_SNAPSHOT_MIN_INTERVAL_SEC:
+            return
+
+        self._last_live_snapshot_monotonic = now
+        self._emit_snapshot()
+
+    @pyqtSlot(str)
     def _on_worker_stopped(self, feed_id: str) -> None:
         thread = self._threads.pop(feed_id, None)
         self._workers.pop(feed_id, None)
@@ -686,9 +838,14 @@ class FeedController(QObject):
             thread.wait(2000)
             thread.deleteLater()
 
-        self._on_worker_status(feed_id, "idle", "Stopped")
+        if not self._shutting_down:
+            self._on_worker_status(feed_id, "idle", "Stopped")
 
+    @pyqtSlot(str, str, str)
     def _on_worker_status(self, feed_id: str, level: str, message: str) -> None:
+        if self._shutting_down:
+            return
+
         self._set_status(feed_id, level, message)
 
     def _on_subfeed_status(self, feed: FeedConfig, role: str, level: str, message: str) -> None:
@@ -721,13 +878,17 @@ class FeedController(QObject):
         )
         self._emit_snapshot()
 
+    @pyqtSlot(object)
     def _on_worker_event(self, event: object) -> None:
+        if self._shutting_down or self._project_transition_active:
+            return
+
         feed = self._feeds.get(getattr(event, "feed_id", ""))
         if feed is None:
             return
 
         if isinstance(event, ParseWarningEvent):
-            role = self._route_role(feed, event.sentence_type)
+            role = self._route_role(feed, event.sentence_type, talker=event.talker)
             self._on_subfeed_status(
                 feed,
                 role,
@@ -737,7 +898,7 @@ class FeedController(QObject):
             return
 
         if isinstance(event, FeedStatusEvent):
-            role = self._route_role(feed, event.sentence_type)
+            role = self._route_role(feed, event.sentence_type, talker=event.talker)
             heading = event.metadata.get("heading_deg") if isinstance(event.metadata, dict) else None
             if isinstance(heading, (int, float)):
                 heading_value = self._normalize_heading(float(heading))
@@ -755,6 +916,10 @@ class FeedController(QObject):
                 code=event.code,
                 message=event.message,
             )
+
+            if event.sentence_type.upper() == "PSIMSNS" and adjusted_level == "info":
+                return
+
             self._on_subfeed_status(
                 feed,
                 role,
@@ -766,7 +931,7 @@ class FeedController(QObject):
         if isinstance(event, HeadingEvent):
             if event.valid and isinstance(event.heading_deg, (int, float)):
                 heading_value = self._normalize_heading(float(event.heading_deg))
-                role = self._route_role(feed, event.sentence_type)
+                role = self._route_role(feed, event.sentence_type, talker=event.talker)
                 self._set_heading(
                     event.feed_id,
                     role,
@@ -779,7 +944,11 @@ class FeedController(QObject):
         if isinstance(event, PositionFixEvent):
             self._handle_position_event(event)
 
+    @pyqtSlot(str, str, str)
     def _on_worker_sentence(self, feed_id: str, source_address: str, sentence: str) -> None:
+        if self._shutting_down or self._project_transition_active:
+            return
+
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
         source = source_address or "-"
         line = f"{stamp}Z [{source}] {sentence}"
@@ -791,11 +960,12 @@ class FeedController(QObject):
         if feed is None:
             return
 
-        role = self._route_role(feed, event.sentence_type)
+        role = self._route_role(feed, event.sentence_type, talker=event.talker)
         render_feed = self._render_feed(feed, role)
 
         def _finish() -> None:
             self._apply_keep_center_for_feed(feed, event.received_at)
+            self._emit_live_snapshot()
 
         if event.sentence_type == "PSIMSSB":
             resolved = self._resolve_psimssb_position(
@@ -852,35 +1022,39 @@ class FeedController(QObject):
 
             if role == "vehicle":
                 self._last_vehicle_fix_by_feed[feed.feed_id] = event.received_at
+                was_fallback = self._vehicle_fallback_active_by_feed.get(feed.feed_id, False)
+                self._vehicle_fallback_active_by_feed[feed.feed_id] = False
+                if was_fallback:
+                    status_message = (
+                        self._role_prefix(feed, role)
+                        + "Vehicle position restored; using vehicle coordinates"
+                    )
+                else:
+                    status_message = self._role_prefix(feed, role) + "Position updated"
+            else:
+                status_message = self._role_prefix(feed, role) + "Position updated"
 
             self._on_subfeed_status(
                 feed,
                 role,
                 "info",
-                self._role_prefix(feed, role) + f"{event.sentence_type} position updated",
+                status_message,
             )
 
-            if role == "vessel" and self._apply_vehicle_fallback_if_needed(feed, event):
-                self._on_subfeed_status(
-                    feed,
-                    "vehicle",
-                    "info",
-                    self._role_prefix(feed, "vehicle")
-                    + "No vehicle position; showing vehicle at vessel position",
-                )
+            if role == "vessel":
+                self._apply_vehicle_fallback_if_needed(feed, event)
             _finish()
             return
 
-        if role == "vehicle" and self._apply_vehicle_fallback(feed, vessel_event=None):
-            self._on_subfeed_status(
-                feed,
-                "vehicle",
-                "info",
-                self._role_prefix(feed, "vehicle")
-                + "No vehicle position; showing vehicle at vessel position",
-            )
-            _finish()
-            return
+        if role == "vehicle":
+            # Keep last valid vehicle position during transient invalid telegrams.
+            if self._vehicle_position_recent(feed, event.received_at):
+                _finish()
+                return
+
+            if self._apply_vehicle_fallback(feed, vessel_event=None):
+                _finish()
+                return
 
         invalid_level = self._position_invalid_level(role, event)
         self._on_subfeed_status(
@@ -912,9 +1086,18 @@ class FeedController(QObject):
             if orientation == "N":
                 northing = float(x)
                 easting = float(y)
-            else:
+            elif orientation == "E":
                 easting = float(x)
                 northing = float(y)
+            else:
+                self._on_subfeed_status(
+                    feed,
+                    status_role,
+                    "warning",
+                    self._role_prefix(feed, status_role)
+                    + f"Unsupported PSIMSSB UTM orientation '{orientation or '<empty>'}'",
+                )
+                return None
             return self._utm_to_wgs84(feed, easting, northing, status_role)
 
         if coordinate_system == "C":
@@ -1102,18 +1285,19 @@ class FeedController(QObject):
         north_m: float,
         status_role: str,
     ) -> Optional[Tuple[float, float]]:
-        if feed.reference_lat is None or feed.reference_lon is None:
+        reference = self._reference_lat_lon_for_local_offsets(feed)
+        if reference is None:
             self._on_subfeed_status(
                 feed,
                 status_role,
                 "warning",
                 self._role_prefix(feed, status_role)
-                + "PSIMSSB local coordinates require reference lat/lon configuration",
+                + "PSIMSSB local coordinates require reference lat/lon configuration or live vessel position",
             )
             return None
 
-        lat0 = feed.reference_lat
-        lon0 = feed.reference_lon
+        lat0 = reference[0]
+        lon0 = reference[1]
 
         lat = lat0 + (north_m / 111320.0)
         cos_lat = math.cos(math.radians(lat0))
@@ -1129,6 +1313,30 @@ class FeedController(QObject):
 
         lon = lon0 + (east_m / (111320.0 * cos_lat))
         return lat, lon
+
+    def _reference_lat_lon_for_local_offsets(self, feed: FeedConfig) -> Optional[Tuple[float, float]]:
+        if isinstance(feed.reference_lat, (int, float)) and isinstance(feed.reference_lon, (int, float)):
+            latitude = float(feed.reference_lat)
+            longitude = float(feed.reference_lon)
+            if math.isfinite(latitude) and math.isfinite(longitude):
+                return latitude, longitude
+
+        candidate_layer_ids: List[str] = []
+        if feed.split_subfeeds_enabled:
+            candidate_layer_ids.append(self._subfeed_layer_id(feed.feed_id, "vessel"))
+        candidate_layer_ids.append(feed.feed_id)
+
+        for candidate_layer_id in candidate_layer_ids:
+            latest = self._last_position_by_layer.get(candidate_layer_id)
+            if latest is None:
+                continue
+
+            latitude = float(latest[0])
+            longitude = float(latest[1])
+            if math.isfinite(latitude) and math.isfinite(longitude):
+                return latitude, longitude
+
+        return None
 
     def _heading_for_feed(self, feed: FeedConfig, heading_feed_id: str) -> Optional[float]:
         candidate_ids: List[str] = []
@@ -1196,16 +1404,25 @@ class FeedController(QObject):
             heading += 360.0
         return heading
 
-    def _route_role(self, feed: FeedConfig, sentence_type: str) -> str:
+    def _route_role(
+        self,
+        feed: FeedConfig,
+        sentence_type: str,
+        talker: Optional[str] = None,
+    ) -> str:
         if not feed.split_subfeeds_enabled:
             return "vessel"
 
         sentence = str(sentence_type or "").strip().upper()
+        talker_id = str(talker or "").strip().upper()
         if feed.split_routing_mode == "manual":
             if sentence in feed.manual_vessel_sentence_types:
                 return "vessel"
             if sentence in feed.manual_vehicle_sentence_types:
                 return "vehicle"
+
+        if sentence == "GLL" and talker_id in _AUTO_VEHICLE_GLL_TALKERS:
+            return "vehicle"
 
         if sentence in _AUTO_VEHICLE_SENTENCE_TYPES or sentence.startswith("PSIMS"):
             return "vehicle"
@@ -1261,6 +1478,7 @@ class FeedController(QObject):
             self._last_position_by_layer.pop(layer_id, None)
 
         self._last_vehicle_fix_by_feed.pop(feed_id, None)
+        self._vehicle_fallback_active_by_feed.pop(feed_id, None)
 
     def _sync_status_slots(self, feed: FeedConfig) -> None:
         self._status_by_feed.setdefault(feed.feed_id, self._default_status())
@@ -1393,6 +1611,18 @@ class FeedController(QObject):
         return bool(feed.vessel_track_enabled)
 
     def _track_dimension_for_main_row(self, feed: FeedConfig) -> str:
+        if feed.split_subfeeds_enabled and feed.vessel_track_enabled and feed.vehicle_track_enabled:
+            vessel_id = self._subfeed_layer_id(feed.feed_id, "vessel")
+            vehicle_id = self._subfeed_layer_id(feed.feed_id, "vehicle")
+            if self._track_has_points(vessel_id) and self._track_has_points(vehicle_id):
+                return "2d+3d"
+
+        track_id = self._track_id_for_main_row(feed)
+        if track_id.endswith(":vehicle"):
+            return "3d"
+        if track_id.endswith(":vessel"):
+            return "2d"
+
         if feed.split_subfeeds_enabled and not feed.vessel_track_enabled and feed.vehicle_track_enabled:
             return "3d"
         return "2d"
@@ -1410,20 +1640,41 @@ class FeedController(QObject):
         return self._track_smoothed_m_by_id(track_id)
 
     def _track_id_for_main_row(self, feed: FeedConfig) -> str:
+        candidate_ids: List[str] = []
+
         if feed.split_subfeeds_enabled:
             if feed.vessel_track_enabled:
-                return self._subfeed_layer_id(feed.feed_id, "vessel")
+                candidate_ids.append(self._subfeed_layer_id(feed.feed_id, "vessel"))
             if feed.vehicle_track_enabled:
-                return self._subfeed_layer_id(feed.feed_id, "vehicle")
+                candidate_ids.append(self._subfeed_layer_id(feed.feed_id, "vehicle"))
+        elif feed.vessel_track_enabled:
+            candidate_ids.append(feed.feed_id)
+
+        if not candidate_ids:
             return ""
-        if feed.vessel_track_enabled:
-            return feed.feed_id
-        return ""
+
+        for candidate_id in candidate_ids:
+            if self._track_has_points(candidate_id):
+                return candidate_id
+
+        return candidate_ids[0]
+
+    def _track_has_points(self, feed_id: str) -> bool:
+        metrics = self._layer_manager.track_metrics(feed_id)
+        if not isinstance(metrics, dict):
+            return False
+        return int(metrics.get("point_count") or 0) >= 2
 
     def _track_enabled_for_role(self, feed: FeedConfig, role: str) -> bool:
         if role == "vehicle":
             return bool(feed.split_subfeeds_enabled and feed.vehicle_track_enabled)
         return bool(feed.vessel_track_enabled)
+
+    @staticmethod
+    def _track_color_for_role(feed: FeedConfig, role: str) -> str:
+        if role == "vehicle" and feed.split_subfeeds_enabled:
+            return str(feed.vehicle_color_hex or feed.color_hex)
+        return str(feed.color_hex)
 
     @staticmethod
     def _track_dimension_for_role(role: str) -> str:
@@ -1691,6 +1942,8 @@ class FeedController(QObject):
         depth_m = metadata.get("depth_m")
         if isinstance(depth_m, (int, float)):
             telemetry["depth_m"] = float(depth_m)
+        elif event.sentence_type.upper() in {"PSIMSSB", "PSIMSNS"}:
+            telemetry.pop("depth_m", None)
 
         heading_deg = metadata.get("display_heading_deg")
         if isinstance(heading_deg, (int, float)):
@@ -1701,6 +1954,9 @@ class FeedController(QObject):
             telemetry["heading_source"] = heading_source.strip()
 
     def _apply_keep_center_for_feed(self, feed: FeedConfig, now: datetime) -> None:
+        if self._project_transition_active:
+            return
+
         coordinates = self._resolve_keep_center_coordinates(feed, now)
         if coordinates is None:
             return
@@ -1845,7 +2101,7 @@ class FeedController(QObject):
             transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
             transformed = transform.transform(source_point)
         except Exception:  # pragma: no cover - depends on QGIS runtime.
-            return source_point
+            return None
 
         if not math.isfinite(transformed.x()) or not math.isfinite(transformed.y()):
             return None
@@ -1934,4 +2190,15 @@ class FeedController(QObject):
             track_depth_m=track_depth_m,
         )
         self._remember_position(vehicle_render.feed_id, latitude, longitude, fallback_event.received_at)
+
+        if not self._vehicle_fallback_active_by_feed.get(feed.feed_id, False):
+            self._on_subfeed_status(
+                feed,
+                "vehicle",
+                "info",
+                self._role_prefix(feed, "vehicle")
+                + "No vehicle position; showing vehicle at vessel position",
+            )
+
+        self._vehicle_fallback_active_by_feed[feed.feed_id] = True
         return True

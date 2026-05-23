@@ -4,10 +4,16 @@ QGIS UDP Nav is a QGIS plugin for receiving multiple concurrent UDP navigation f
 
 It supports standard NMEA 0183 plus Kongsberg HiPAP sentences, split vessel/vehicle routing, keep-center map tracking, live telemetry cards, track recording (2D and 3D), and persistent saved-track export with operator metadata.
 
+## Documentation Index
+
+- Full plugin documentation (current state): docs/CURRENT_STATE.md
+- Release notes: CHANGELOG.md
+- License: LICENSE
+
 ## Version and Compatibility
 
 - Plugin name: QGIS UDP Nav
-- Plugin version: 0.1.0
+- Plugin version: 0.2.0
 - QGIS compatibility: 4.0 to 4.99
 - Python requirement in project metadata: >= 3.10
 
@@ -39,6 +45,8 @@ It supports standard NMEA 0183 plus Kongsberg HiPAP sentences, split vessel/vehi
   - split vessel + vehicle
 - Split routing modes:
   - auto routing
+    - GGA/GLL/RMC and heading-related standard NMEA default to vessel
+    - Kongsberg PSIMS* and HiPAP transponder GLL talkers (INGLL/CPGLL) route to vehicle
   - manual sentence-type routing
 - Optional fallback can show vehicle on vessel position when vehicle position is missing/stale.
 
@@ -65,13 +73,19 @@ It supports standard NMEA 0183 plus Kongsberg HiPAP sentences, split vessel/vehi
 ### Telemetry and Operator UI
 
 - Feed Sentence Inspector with live sentence stream.
-- No Scroll mode for field-wise sentence snapshot view.
+- No Scroll mode for field-wise sentence snapshot view (enabled by default on startup).
+- Startup mode selector in dock: Off / First / All auto-start behavior.
+- Group Sources selection menu stays open while toggling checkboxes.
 - Optional Info Cards:
   - Heading
   - Speed
   - Depth
   - Track Raw length
   - Track Smooth length
+- Track Live selector (split feeds):
+  - Vessel (x/y)
+  - Vehicle (x/y/z)
+  - per-feed selection memory while navigating rows
 
 ### Track Collection and Metrics
 
@@ -84,7 +98,7 @@ It supports standard NMEA 0183 plus Kongsberg HiPAP sentences, split vessel/vehi
 - Length estimates:
   - raw polyline length
   - smoothed length (moving-average based path smoothing)
-- Turning a track toggle off clears that active role track immediately.
+- Turning a track toggle off auto-saves that active role track to Saved Tracks, then clears it.
 
 ### Persistent Saved Tracks
 
@@ -142,7 +156,7 @@ These runtime layers are marked as plugin-ephemeral so QGIS does not repeatedly 
 Typical operator flow:
 
 1. Add feed with host/port and target mode.
-2. Start feed.
+2. Feed starts automatically according to selected startup mode (or start manually if mode is Off).
 3. Optional: configure symbol and color for vessel/vehicle roles.
 4. Optional: enable keep-center mode.
 5. Optional: enable Track Vessel and/or Track Vehicle.
@@ -199,10 +213,20 @@ Main components:
 
 ### Test and Validation
 
+Current automated coverage includes parser core behavior, standard NMEA parsing, Kongsberg parsing,
+pipeline checksum/routing behavior, settings storage, realistic log-replay workflows, and long-horizon
+virtual soak scenarios.
+
 Run tests:
 
 ```powershell
 python -m pytest -q
+```
+
+Run only long-horizon simulation tests:
+
+```powershell
+python -m pytest -q tests/test_soak_simulation.py
 ```
 
 Run compile sanity check:
@@ -210,6 +234,22 @@ Run compile sanity check:
 ```powershell
 python -m compileall -q qgis_udp_nav_plugin
 ```
+
+### Long-Run Practical Soak
+
+If you want practical unattended runtime validation with QGIS open, run the UDP soak simulator
+in another terminal to replay a synthetic mission cycle repeatedly (pre-deploy -> transponder on ->
+tracking -> recovery -> delayed transponder-off behavior):
+
+```powershell
+python tools/udp_soak_simulator.py --host 127.0.0.1 --port 10110 --virtual-days 7 --speedup 120
+```
+
+Notes:
+
+- Increase `--virtual-days` for week-scale replay (for example 14 or 28).
+- `--speedup` controls how fast virtual time advances relative to wall-clock.
+- Keep QGIS/plugin running while the simulator sends UDP traffic.
 
 ### Deploy to Local QGIS Profile (Windows)
 
@@ -238,3 +278,7 @@ Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
 ## Current Scope
 
 This plugin is focused on live operational navigation display and recording workflows in QGIS, with practical operator controls for split vessel/vehicle tracking and metadata-tagged track archival.
+
+## License
+
+This project is licensed under the ISC License. See LICENSE.

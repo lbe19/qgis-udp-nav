@@ -9,6 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QSizePolicy,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -105,6 +106,13 @@ def _align_center_flag():
     return Qt.AlignCenter
 
 
+def _size_policy(name: str):
+    enum_cls = getattr(QSizePolicy, "Policy", None)
+    if enum_cls is not None and hasattr(enum_cls, name):
+        return getattr(enum_cls, name)
+    return getattr(QSizePolicy, name)
+
+
 def _event_type(name: str):
     enum_cls = getattr(QEvent, "Type", None)
     if enum_cls is not None and hasattr(enum_cls, name):
@@ -133,6 +141,19 @@ def _qcolor_css(color: QColor) -> str:
     if isinstance(color, QColor) and color.isValid():
         return color.name()
     return "#000000"
+
+
+class _PersistentSelectionMenu(QMenu):
+    """QMenu variant that stays open while toggling checkable actions."""
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        action = self.activeAction()
+        if action is not None and action.isCheckable() and action.isEnabled():
+            action.trigger()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
 
 
 QGIS_MARKER_OPTIONS = [
@@ -1099,6 +1120,7 @@ class FeedDockWidget(QDockWidget):
     stop_all_requested = pyqtSignal()
     save_tracks_requested = pyqtSignal(str, str, str)
     track_toggle_requested = pyqtSignal(str, str, bool)
+    startup_mode_changed = pyqtSignal(str)
     color_changed = pyqtSignal(str, str, str)
     symbol_changed = pyqtSignal(str, dict)
     vessel_profiles_updated = pyqtSignal(dict)
@@ -1118,6 +1140,8 @@ class FeedDockWidget(QDockWidget):
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
         self._group_source_ids: Set[str] = set()
+        self._track_live_role = "vessel"
+        self._track_live_role_by_base_feed: Dict[str, str] = {}
         self._max_log_lines = 600
 
         root = QWidget(self)
@@ -1137,6 +1161,13 @@ class FeedDockWidget(QDockWidget):
         self._stop_button = QPushButton("Stop")
         self._start_all_button = QPushButton("Start All")
         self._stop_all_button = QPushButton("Stop All")
+        self._startup_mode_combo = QComboBox()
+        self._startup_mode_combo.addItem("Auto Start: Off", "off")
+        self._startup_mode_combo.addItem("Auto Start: First", "first")
+        self._startup_mode_combo.addItem("Auto Start: All", "all")
+        self._startup_mode_combo.setToolTip(
+            "Configure what the plugin starts automatically on launch."
+        )
         self._keep_vessel_center_button = QPushButton("Keep Vessel Center")
         self._keep_vessel_center_button.setCheckable(True)
         self._keep_vehicle_center_button = QPushButton("Keep Vehicle Center")
@@ -1151,7 +1182,7 @@ class FeedDockWidget(QDockWidget):
         self._save_tracks_button = QPushButton("Save Tracks")
         self._info_cards_button = QPushButton("Info Cards")
         self._info_cards_button.setCheckable(True)
-        self._group_menu = QMenu(self)
+        self._group_menu = _PersistentSelectionMenu(self)
         self._group_options_button.setMenu(self._group_menu)
         self._group_options_button.setToolTip(
             "Choose which live sources are included in Group center."
@@ -1196,6 +1227,7 @@ class FeedDockWidget(QDockWidget):
         button_grid.addWidget(self._track_vessel_button, 5, 0)
         button_grid.addWidget(self._track_vehicle_button, 5, 1)
         button_grid.addWidget(self._save_tracks_button, 5, 2)
+        button_grid.addWidget(self._startup_mode_combo, 6, 0, 1, 3)
 
         self._table = QTableWidget(0, 9)
         self._table.setHorizontalHeaderLabels(
@@ -1267,9 +1299,26 @@ class FeedDockWidget(QDockWidget):
         splitter.setChildrenCollapsible(False)
 
         self._info_cards_widget = QWidget(self)
-        info_layout = QHBoxLayout(self._info_cards_widget)
+        info_layout = QVBoxLayout(self._info_cards_widget)
         info_layout.setContentsMargins(0, 0, 0, 0)
-        info_layout.setSpacing(8)
+        info_layout.setSpacing(6)
+
+        track_focus_layout = QHBoxLayout()
+        track_focus_layout.setContentsMargins(0, 0, 0, 0)
+        track_focus_layout.setSpacing(6)
+        self._track_live_label = QLabel("Track Live")
+        self._track_live_combo = QComboBox(self._info_cards_widget)
+        self._track_live_combo.setToolTip(
+            "Choose whether live track cards follow vessel (x/y) or vehicle (x/y/z)."
+        )
+        track_focus_layout.addWidget(self._track_live_label)
+        track_focus_layout.addWidget(self._track_live_combo, 0)
+        track_focus_layout.addStretch(1)
+        info_layout.addLayout(track_focus_layout)
+
+        cards_layout = QHBoxLayout()
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(8)
 
         self._heading_card = QLabel("Heading\n--")
         self._speed_card = QLabel("Speed\n--")
@@ -1285,8 +1334,11 @@ class FeedDockWidget(QDockWidget):
         ):
             card.setAlignment(_align_center_flag())
             card.setMinimumHeight(54)
-            card.setWordWrap(True)
-            info_layout.addWidget(card, 1)
+            card.setWordWrap(False)
+            card.setSizePolicy(_size_policy("Expanding"), _size_policy("Fixed"))
+            cards_layout.addWidget(card, 1)
+
+        info_layout.addLayout(cards_layout)
 
         self._apply_info_cards_theme()
 
@@ -1314,13 +1366,28 @@ class FeedDockWidget(QDockWidget):
         self._track_vehicle_button.toggled.connect(self._on_track_vehicle_toggled)
         self._group_menu.aboutToShow.connect(self._refresh_group_sources)
         self._info_cards_button.toggled.connect(self._on_info_cards_toggled)
+        self._track_live_combo.currentIndexChanged.connect(self._on_track_live_role_changed)
         self._save_tracks_button.clicked.connect(self._on_save_tracks_clicked)
         self._start_all_button.clicked.connect(self.start_all_requested)
         self._stop_all_button.clicked.connect(self.stop_all_requested)
+        self._startup_mode_combo.currentIndexChanged.connect(
+            self._on_startup_mode_changed
+        )
         self._pause_debug_button.toggled.connect(self._on_pause_toggled)
         self._no_scroll_button.toggled.connect(self._on_no_scroll_toggled)
         self._clear_debug_button.clicked.connect(self._on_clear_debug_clicked)
         self._table.itemSelectionChanged.connect(self._refresh_debug_panel)
+
+        self._no_scroll_button.setChecked(True)
+
+    def set_startup_mode(self, mode: str) -> None:
+        normalized = str(mode or "").strip().lower() or "first"
+        index = self._startup_mode_combo.findData(normalized)
+        if index < 0:
+            index = self._startup_mode_combo.findData("first")
+        blocker = self._startup_mode_combo.blockSignals(True)
+        self._startup_mode_combo.setCurrentIndex(max(0, index))
+        self._startup_mode_combo.blockSignals(blocker)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
@@ -1333,42 +1400,48 @@ class FeedDockWidget(QDockWidget):
     def set_rows(self, rows: list[dict]) -> None:
         selected_feed = self._selected_feed_id()
 
-        self._table.setRowCount(0)
-        self._rows_by_feed.clear()
+        blocked = self._table.blockSignals(True)
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._table.setRowCount(0)
+            self._rows_by_feed.clear()
 
-        for row_data in rows:
-            row_index = self._table.rowCount()
-            self._table.insertRow(row_index)
+            for row_data in rows:
+                row_index = self._table.rowCount()
+                self._table.insertRow(row_index)
 
-            feed_id = row_data.get("feed_id", "")
-            self._rows_by_feed[feed_id] = dict(row_data)
+                feed_id = row_data.get("feed_id", "")
+                self._rows_by_feed[feed_id] = dict(row_data)
 
-            icon_path = row_data.get("icon_path") or ""
-            symbol_display = row_data.get("symbol_summary") or ""
-            if not symbol_display and icon_path:
-                symbol_display = os.path.basename(icon_path)
+                icon_path = row_data.get("icon_path") or ""
+                symbol_display = row_data.get("symbol_summary") or ""
+                if not symbol_display and icon_path:
+                    symbol_display = os.path.basename(icon_path)
 
-            values = [
-                feed_id,
-                row_data.get("name", ""),
-                row_data.get("bind_host", ""),
-                str(row_data.get("port", "")),
-                row_data.get("checksum_policy", ""),
-                row_data.get("status", ""),
-                row_data.get("message", ""),
-                row_data.get("color_hex", ""),
-                symbol_display,
-            ]
+                values = [
+                    feed_id,
+                    row_data.get("name", ""),
+                    row_data.get("bind_host", ""),
+                    str(row_data.get("port", "")),
+                    row_data.get("checksum_policy", ""),
+                    row_data.get("status", ""),
+                    row_data.get("message", ""),
+                    row_data.get("color_hex", ""),
+                    symbol_display,
+                ]
 
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                self._table.setItem(row_index, col, item)
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    self._table.setItem(row_index, col, item)
 
-            log_feed_id = str(row_data.get("parent_feed_id") or feed_id)
-            if log_feed_id not in self._sentence_logs:
-                self._sentence_logs[log_feed_id] = []
-            if log_feed_id not in self._sentence_snapshots:
-                self._sentence_snapshots[log_feed_id] = {}
+                log_feed_id = str(row_data.get("parent_feed_id") or feed_id)
+                if log_feed_id not in self._sentence_logs:
+                    self._sentence_logs[log_feed_id] = []
+                if log_feed_id not in self._sentence_snapshots:
+                    self._sentence_snapshots[log_feed_id] = {}
+        finally:
+            self._table.setUpdatesEnabled(True)
+            self._table.blockSignals(blocked)
 
         self._prune_group_sources_from_rows()
 
@@ -1577,6 +1650,12 @@ class FeedDockWidget(QDockWidget):
         else:
             self._no_scroll_button.setText("No Scroll: Off")
         self._refresh_debug_panel()
+
+    def _on_startup_mode_changed(self, _index: int) -> None:
+        mode = str(self._startup_mode_combo.currentData() or "first").strip().lower()
+        if mode not in {"off", "first", "all"}:
+            mode = "first"
+        self.startup_mode_changed.emit(mode)
 
     def _on_keep_vessel_center_toggled(self, enabled: bool) -> None:
         self._on_keep_center_mode_toggled("vessel", enabled)
@@ -1821,7 +1900,101 @@ class FeedDockWidget(QDockWidget):
         else:
             self._info_cards_button.setText("Info Cards")
         self._apply_info_cards_theme()
+        self._sync_track_live_selector()
         self._refresh_info_cards()
+
+    def _on_track_live_role_changed(self, _index: int) -> None:
+        role = str(self._track_live_combo.currentData() or "vessel").strip().lower()
+        if role not in {"vessel", "vehicle"}:
+            role = "vessel"
+        self._track_live_role = role
+
+        base_feed_id = self._selected_base_feed_id()
+        if base_feed_id:
+            self._track_live_role_by_base_feed[base_feed_id] = role
+
+        self._refresh_info_cards()
+
+    def _sync_track_live_selector(self) -> None:
+        base_feed_id = self._selected_base_feed_id()
+        base_row = self._rows_by_feed.get(base_feed_id, {}) if base_feed_id else {}
+        split_enabled = bool(base_row.get("split_subfeeds_enabled", False))
+        show_selector = bool(base_feed_id and split_enabled)
+
+        options: List[tuple[str, str]] = [("vessel", "Vessel (x/y)")]
+        if split_enabled:
+            options.append(("vehicle", "Vehicle (x/y/z)"))
+
+        option_roles = {role for role, _label in options}
+        preferred_role = self._track_live_role
+        if base_feed_id:
+            saved_role = str(
+                self._track_live_role_by_base_feed.get(base_feed_id, preferred_role)
+            ).strip().lower()
+            if saved_role in {"vessel", "vehicle"}:
+                preferred_role = saved_role
+
+        selector_role = preferred_role if preferred_role in option_roles else "vessel"
+
+        current_options: List[tuple[str, str]] = []
+        for index in range(self._track_live_combo.count()):
+            option_role = str(self._track_live_combo.itemData(index) or "").strip().lower()
+            option_label = self._track_live_combo.itemText(index)
+            current_options.append((option_role, option_label))
+
+        popup_open = self._track_live_popup_open()
+        options_changed = current_options != options
+        current_role = str(self._track_live_combo.currentData() or "").strip().lower()
+        role_changed = current_role != selector_role
+
+        if not popup_open and (options_changed or role_changed):
+            blocker = self._track_live_combo.blockSignals(True)
+            if options_changed:
+                self._track_live_combo.clear()
+                for role, label in options:
+                    self._track_live_combo.addItem(label, role)
+
+            index = self._track_live_combo.findData(selector_role)
+            if index < 0 and self._track_live_combo.count() > 0:
+                index = 0
+            if index >= 0:
+                self._track_live_combo.setCurrentIndex(index)
+            self._track_live_combo.blockSignals(blocker)
+
+            current_role = str(self._track_live_combo.currentData() or "").strip().lower()
+
+        if current_role not in option_roles:
+            current_role = selector_role
+
+        if show_selector and current_role in {"vessel", "vehicle"}:
+            self._track_live_role = current_role
+            if base_feed_id:
+                self._track_live_role_by_base_feed[base_feed_id] = current_role
+
+        if popup_open:
+            self._track_live_label.setVisible(True)
+            self._track_live_combo.setVisible(True)
+            self._track_live_combo.setEnabled(True)
+        else:
+            self._track_live_label.setVisible(show_selector)
+            self._track_live_combo.setVisible(show_selector)
+            self._track_live_combo.setEnabled(show_selector)
+
+    def _track_live_popup_open(self) -> bool:
+        view = self._track_live_combo.view()
+        visible_fn = getattr(view, "isVisible", None)
+        if callable(visible_fn):
+            return bool(visible_fn())
+        return False
+
+    @staticmethod
+    def _track_dimension_text(track_dimension: str) -> str:
+        dimension = str(track_dimension or "").strip().lower()
+        if dimension in {"3d", "x/y/z"}:
+            return "x/y/z"
+        if dimension in {"2d+3d", "3d+2d", "2d/3d", "mixed"}:
+            return "x/y + x/y/z"
+        return "x/y"
 
     def _apply_info_cards_theme(self) -> None:
         palette = self.palette()
@@ -1865,15 +2038,30 @@ class FeedDockWidget(QDockWidget):
 
         row_data = self._selected_row_data() or {}
         role = str(row_data.get("subfeed_role") or "").strip().lower()
+        base_feed_id = self._selected_base_feed_id()
+        base_row = self._rows_by_feed.get(base_feed_id, {}) if base_feed_id else {}
+        split_enabled = bool(base_row.get("split_subfeeds_enabled", False))
 
         heading = row_data.get("heading_deg")
         heading_source = str(row_data.get("heading_source") or "").strip()
         speed_knots = row_data.get("speed_knots")
         depth_m = row_data.get("depth_m")
-        track_enabled = bool(row_data.get("track_enabled", False))
-        track_dimension = str(row_data.get("track_dimension") or "2d").strip().lower()
-        track_raw_m = row_data.get("track_raw_m")
-        track_smoothed_m = row_data.get("track_smoothed_m")
+        track_row = row_data
+        track_role = "vehicle" if role == "vehicle" else "vessel"
+        if split_enabled and base_feed_id:
+            selected_track_role = self._track_live_role
+            if selected_track_role not in {"vessel", "vehicle"}:
+                selected_track_role = "vessel"
+            selected_track_id = f"{base_feed_id}:{selected_track_role}"
+            candidate_track_row = self._rows_by_feed.get(selected_track_id)
+            if isinstance(candidate_track_row, dict):
+                track_row = candidate_track_row
+                track_role = selected_track_role
+
+        track_enabled = bool(track_row.get("track_enabled", False))
+        track_dimension = str(track_row.get("track_dimension") or "2d").strip().lower()
+        track_raw_m = track_row.get("track_raw_m")
+        track_smoothed_m = track_row.get("track_smoothed_m")
 
         if isinstance(heading, (int, float)):
             heading_text = f"Heading\n{float(heading):.1f} deg"
@@ -1898,22 +2086,31 @@ class FeedDockWidget(QDockWidget):
             else:
                 depth_text = "Depth\nn/a"
 
-        track_suffix = "3D" if track_dimension == "3d" else "2D"
+        track_dimension_text = self._track_dimension_text(track_dimension)
+        track_role_label = "Vehicle" if track_role == "vehicle" else "Vessel"
         if not track_enabled:
-            track_raw_text = f"Track Raw {track_suffix}\noff"
-            track_smooth_text = f"Track Smooth {track_suffix}\noff"
+            track_raw_text = f"Track Raw {track_role_label}\n{track_dimension_text}: off"
+            track_smooth_text = (
+                f"Track Smooth {track_role_label}\n{track_dimension_text}: off"
+            )
         else:
             if isinstance(track_raw_m, (int, float)):
-                track_raw_text = f"Track Raw {track_suffix}\n{float(track_raw_m):.1f} m"
+                track_raw_text = (
+                    f"Track Raw {track_role_label}\n"
+                    f"{track_dimension_text}: {float(track_raw_m):.1f} m"
+                )
             else:
-                track_raw_text = f"Track Raw {track_suffix}\n--"
+                track_raw_text = f"Track Raw {track_role_label}\n{track_dimension_text}: --"
 
             if isinstance(track_smoothed_m, (int, float)):
                 track_smooth_text = (
-                    f"Track Smooth {track_suffix}\n{float(track_smoothed_m):.1f} m"
+                    f"Track Smooth {track_role_label}\n"
+                    f"{track_dimension_text}: {float(track_smoothed_m):.1f} m"
                 )
             else:
-                track_smooth_text = f"Track Smooth {track_suffix}\n--"
+                track_smooth_text = (
+                    f"Track Smooth {track_role_label}\n{track_dimension_text}: --"
+                )
 
         self._heading_card.setText(heading_text)
         self._speed_card.setText(speed_text)
@@ -1977,6 +2174,7 @@ class FeedDockWidget(QDockWidget):
             else "Keep Group Center"
         )
         self._update_group_options_button_text()
+        self._sync_track_live_selector()
 
     def _sync_stop_button_state_from_selected_row(self) -> None:
         base_feed_id = self._selected_base_feed_id()

@@ -15,6 +15,9 @@ class SettingsStore:
     PREFIX = "qgis_udp_nav_plugin"
     FEEDS_KEY = f"{PREFIX}/feeds"
     VESSEL_PROFILES_KEY = f"{PREFIX}/vessel_profiles"
+    STARTUP_MODE_KEY = f"{PREFIX}/startup_mode"
+    STARTUP_MODES = {"off", "first", "all"}
+    DEFAULT_STARTUP_MODE = "first"
 
     def __init__(self) -> None:
         self._settings = QgsSettings()
@@ -78,6 +81,19 @@ class SettingsStore:
             safe_profiles[profile_name] = dict(profile)
 
         self._settings.setValue(self.VESSEL_PROFILES_KEY, json.dumps(safe_profiles))
+
+    def load_startup_mode(self) -> str:
+        raw = str(self._settings.value(self.STARTUP_MODE_KEY, self.DEFAULT_STARTUP_MODE) or "")
+        mode = raw.strip().lower()
+        if mode not in self.STARTUP_MODES:
+            return self.DEFAULT_STARTUP_MODE
+        return mode
+
+    def save_startup_mode(self, mode: str) -> None:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in self.STARTUP_MODES:
+            normalized = self.DEFAULT_STARTUP_MODE
+        self._settings.setValue(self.STARTUP_MODE_KEY, normalized)
 
     @staticmethod
     def _default_feed() -> FeedConfig:
