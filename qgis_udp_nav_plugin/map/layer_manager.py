@@ -45,6 +45,14 @@ _SAVED_TRACKS_FILENAME = "saved_tracks.geojson"
 _SAVED_TRACK_COLOR_HEX = "#36454F"
 _SAVED_TRACK_VESSEL_FALLBACK_HEX = "#8f5f3b"
 _SAVED_TRACK_VEHICLE_FALLBACK_HEX = "#2f5f73"
+_LAYER_TAG_KIND = "qgis_udp_nav_layer_kind"
+_LAYER_TAG_FEED_ID = "qgis_udp_nav_feed_id"
+_LAYER_KIND_LIVE = "live"
+_LAYER_KIND_OVERVIEW = "overview"
+_LAYER_KIND_TRACK = "track"
+
+
+_TRACK_GEOMETRY_REBUILD_INTERVAL = 5
 
 
 class LayerManager:
@@ -56,10 +64,37 @@ class LayerManager:
         self._track_lengths: Dict[str, Tuple[float, float]] = {}
         self._track_dimensions: Dict[str, str] = {}
         self._track_last_depth: Dict[str, float] = {}
+        # Incremental track length state (Phase 1)
+        self._track_origin: Dict[str, Tuple[float, float]] = {}
+        self._track_local_xy: Dict[str, List[Tuple[float, float, float]]] = {}
+        self._track_raw_length: Dict[str, float] = {}
+        # Geometry rebuild throttle state (Phase 2)
+        self._track_geometry_dirty: Dict[str, int] = {}
+        # Live position feature ID cache (Phase 5)
+        self._live_feature_id: Dict[str, int] = {}
         self._heading_by_feed: Dict[str, float] = {}
         self._position_by_feed: Dict[str, Tuple[float, float]] = {}
         self._saved_tracks_layer: Optional[QgsVectorLayer] = None
         self._saved_tracks_file_path: str = ""
+        self._prune_svg_cache()
+
+    @staticmethod
+    def _prune_svg_cache(max_age_days: int = 7) -> None:
+        cache_dir = os.path.join(tempfile.gettempdir(), "qgis_udp_nav_symbol_cache")
+        if not os.path.isdir(cache_dir):
+            return
+        try:
+            import time as _time
+            cutoff = _time.time() - (max_age_days * 86400)
+            for name in os.listdir(cache_dir):
+                fpath = os.path.join(cache_dir, name)
+                try:
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     @staticmethod
     def _layer_id(layer: Optional[QgsVectorLayer]) -> str:
@@ -142,11 +177,6 @@ class LayerManager:
         layer = self._ensure_layer(feed)
         provider = layer.dataProvider()
 
-        existing_ids = [feature.id() for feature in layer.getFeatures()]
-        if existing_ids:
-            provider.deleteFeatures(existing_ids)
-
-        feature = QgsFeature(layer.fields())
         self._position_by_feed[feed.feed_id] = (event.latitude, event.longitude)
         heading = event.metadata.get("display_heading_deg")
         heading_source = event.metadata.get("heading_source") or ""
@@ -158,52 +188,54 @@ class LayerManager:
         if feed.symbol_mode in {"vessel", "vehicle"}:
             heading_for_shape = self._heading_by_feed.get(feed.feed_id, 0.0)
             if feed.symbol_mode == "vehicle":
-                feature.setGeometry(
-                    self._build_vehicle_geometry(
-                        latitude=event.latitude,
-                        longitude=event.longitude,
-                        heading_deg=heading_for_shape,
-                        vehicle_length_m=feed.vessel_length_m,
-                        vehicle_width_m=feed.vessel_width_m,
-                        gps_longitudinal_reference=feed.vessel_gps_longitudinal_reference,
-                        gps_offset_from_reference_m=feed.vessel_gps_offset_from_reference_m,
-                        gps_offset_starboard_m=feed.vessel_gps_offset_starboard_m,
-                    )
+                geometry = self._build_vehicle_geometry(
+                    latitude=event.latitude,
+                    longitude=event.longitude,
+                    heading_deg=heading_for_shape,
+                    vehicle_length_m=feed.vessel_length_m,
+                    vehicle_width_m=feed.vessel_width_m,
+                    gps_longitudinal_reference=feed.vessel_gps_longitudinal_reference,
+                    gps_offset_from_reference_m=feed.vessel_gps_offset_from_reference_m,
+                    gps_offset_starboard_m=feed.vessel_gps_offset_starboard_m,
                 )
             else:
-                feature.setGeometry(
-                    self._build_vessel_geometry(
-                        latitude=event.latitude,
-                        longitude=event.longitude,
-                        heading_deg=heading_for_shape,
-                        vessel_length_m=feed.vessel_length_m,
-                        vessel_width_m=feed.vessel_width_m,
-                        gps_longitudinal_reference=feed.vessel_gps_longitudinal_reference,
-                        gps_offset_from_reference_m=feed.vessel_gps_offset_from_reference_m,
-                        gps_offset_starboard_m=feed.vessel_gps_offset_starboard_m,
-                    )
+                geometry = self._build_vessel_geometry(
+                    latitude=event.latitude,
+                    longitude=event.longitude,
+                    heading_deg=heading_for_shape,
+                    vessel_length_m=feed.vessel_length_m,
+                    vessel_width_m=feed.vessel_width_m,
+                    gps_longitudinal_reference=feed.vessel_gps_longitudinal_reference,
+                    gps_offset_from_reference_m=feed.vessel_gps_offset_from_reference_m,
+                    gps_offset_starboard_m=feed.vessel_gps_offset_starboard_m,
                 )
             heading_value = heading_for_shape
         else:
-            feature.setGeometry(
-                QgsGeometry.fromPointXY(QgsPointXY(event.longitude, event.latitude))
-            )
+            geometry = QgsGeometry.fromPointXY(QgsPointXY(event.longitude, event.latitude))
 
-        feature.setAttributes(
-            [
-                feed.feed_id,
-                feed.name,
-                event.sentence_type,
-                event.status_text,
-                event.fix_time_utc or "",
-                event.metadata.get("error_code") or "",
-                event.received_at.isoformat(),
-                heading_value,
-                heading_source,
-            ]
-        )
+        attributes = [
+            feed.feed_id,
+            feed.name,
+            event.sentence_type,
+            event.status_text,
+            event.fix_time_utc or "",
+            event.metadata.get("error_code") or "",
+            event.received_at.isoformat(),
+            heading_value,
+            heading_source,
+        ]
 
-        provider.addFeature(feature)
+        cached_fid = self._live_feature_id.get(feed.feed_id)
+        if cached_fid is not None:
+            attr_map = {cached_fid: {i: v for i, v in enumerate(attributes)}}
+            provider.changeGeometryValues({cached_fid: geometry})
+            provider.changeAttributeValues(attr_map)
+        else:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(geometry)
+            feature.setAttributes(attributes)
+            provider.addFeature(feature)
+            self._live_feature_id[feed.feed_id] = feature.id()
 
         if feed.symbol_mode in {"vessel", "vehicle"}:
             overview_heading = self._heading_by_feed.get(feed.feed_id, 0.0)
@@ -245,7 +277,14 @@ class LayerManager:
 
     def remove_feed(self, feed_id: str) -> None:
         layer = self._cached_layer(self._layers, feed_id)
+        layer_name = layer.name() if layer is not None else ""
         self._layers.pop(feed_id, None)
+        self._live_feature_id.pop(feed_id, None)
+        self._remove_project_layers_for_feed(
+            feed_id,
+            _LAYER_KIND_LIVE,
+            expected_name=layer_name,
+        )
         self._remove_overview_layer(feed_id)
         self.clear_track(feed_id)
         self._heading_by_feed.pop(feed_id, None)
@@ -281,6 +320,34 @@ class LayerManager:
                 [float(latitude), float(longitude), float(depth_m)]
                 for latitude, longitude, depth_m in points
             ],
+        }
+
+    def detach_track_snapshot(self, feed_id: str) -> Optional[dict]:
+        layer = self._cached_layer(self._track_layers, feed_id)
+        self._track_layers.pop(feed_id, None)
+
+        points = self._track_points.pop(feed_id, None)
+        lengths = self._track_lengths.pop(feed_id, None)
+        dimension = self._track_dimensions.pop(feed_id, None)
+        self._track_last_depth.pop(feed_id, None)
+        self._track_origin.pop(feed_id, None)
+        self._track_local_xy.pop(feed_id, None)
+        self._track_raw_length.pop(feed_id, None)
+        self._track_geometry_dirty.pop(feed_id, None)
+
+        self._remove_layer_from_project(layer)
+
+        if lengths is None or points is None or len(points) < 2:
+            return None
+
+        return {
+            "feed_id": str(feed_id),
+            "raw_m": float(lengths[0]),
+            "smoothed_m": float(lengths[1]),
+            "dimension": str(dimension or "2d"),
+            "point_count": len(points),
+            # Reuse existing tuples so UI toggle stays fast; conversion happens at write time.
+            "points": points,
         }
 
     def save_tracks(
@@ -587,12 +654,22 @@ class LayerManager:
 
     def clear_track(self, feed_id: str) -> None:
         layer = self._cached_layer(self._track_layers, feed_id)
+        layer_name = layer.name() if layer is not None else ""
         self._track_layers.pop(feed_id, None)
         self._track_points.pop(feed_id, None)
         self._track_lengths.pop(feed_id, None)
         self._track_dimensions.pop(feed_id, None)
         self._track_last_depth.pop(feed_id, None)
+        self._track_origin.pop(feed_id, None)
+        self._track_local_xy.pop(feed_id, None)
+        self._track_raw_length.pop(feed_id, None)
+        self._track_geometry_dirty.pop(feed_id, None)
 
+        self._remove_project_layers_for_feed(
+            feed_id,
+            _LAYER_KIND_TRACK,
+            expected_name=layer_name,
+        )
         self._remove_layer_from_project(layer)
 
     def update_heading(self, feed: FeedConfig, heading_deg: float) -> None:
@@ -619,15 +696,114 @@ class LayerManager:
         for feed_id in list(self._track_layers.keys()):
             self.clear_track(feed_id)
 
+        # Remove any plugin memory layers left behind after cache resets.
+        self._remove_all_plugin_ephemeral_layers()
+        self._layers.clear()
+        self._overview_layers.clear()
+        self._track_layers.clear()
+        self._track_points.clear()
+        self._track_lengths.clear()
+        self._track_dimensions.clear()
+        self._track_last_depth.clear()
+        self._track_origin.clear()
+        self._track_local_xy.clear()
+        self._track_raw_length.clear()
+        self._track_geometry_dirty.clear()
+        self._live_feature_id.clear()
+        self._heading_by_feed.clear()
+        self._position_by_feed.clear()
+
     @staticmethod
     def _mark_ephemeral_layer(layer: QgsVectorLayer) -> None:
         # Prevent QGIS from prompting to save plugin-managed memory layers on exit.
         layer.setCustomProperty("skipMemoryLayersCheck", 1)
         layer.setCustomProperty("qgis_udp_nav_ephemeral", 1)
 
+    @staticmethod
+    def _tag_layer(layer: QgsVectorLayer, *, feed_id: str, layer_kind: str) -> None:
+        layer.setCustomProperty(_LAYER_TAG_FEED_ID, str(feed_id or ""))
+        layer.setCustomProperty(_LAYER_TAG_KIND, str(layer_kind or ""))
+
+    @staticmethod
+    def _is_plugin_ephemeral_layer(layer: QgsVectorLayer) -> bool:
+        marked = layer.customProperty("qgis_udp_nav_ephemeral", 0)
+        marked_text = str(marked).strip().lower()
+        return marked_text in {"1", "true", "yes"}
+
+    def _project_layers_for_feed(
+        self,
+        feed_id: str,
+        layer_kind: str,
+        expected_name: str = "",
+    ) -> List[QgsVectorLayer]:
+        feed_text = str(feed_id or "").strip()
+        kind_text = str(layer_kind or "").strip().lower()
+        expected_name_text = str(expected_name or "").strip()
+        matches: List[QgsVectorLayer] = []
+
+        for layer in QgsProject.instance().mapLayers().values():
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+
+            tagged_feed_id = str(layer.customProperty(_LAYER_TAG_FEED_ID, "") or "").strip()
+            tagged_kind = str(layer.customProperty(_LAYER_TAG_KIND, "") or "").strip().lower()
+            if tagged_feed_id == feed_text and tagged_kind == kind_text:
+                matches.append(layer)
+                continue
+
+            if not expected_name_text or layer.name() != expected_name_text:
+                continue
+            if not self._is_plugin_ephemeral_layer(layer):
+                continue
+            matches.append(layer)
+
+        return matches
+
+    def _adopt_existing_project_layer(
+        self,
+        feed_id: str,
+        layer_kind: str,
+        expected_name: str,
+    ) -> Optional[QgsVectorLayer]:
+        matches = self._project_layers_for_feed(
+            feed_id,
+            layer_kind,
+            expected_name=expected_name,
+        )
+        if not matches:
+            return None
+
+        adopted = matches[0]
+        self._tag_layer(adopted, feed_id=feed_id, layer_kind=layer_kind)
+        for duplicate in matches[1:]:
+            self._remove_layer_from_project(duplicate)
+        return adopted
+
+    def _remove_project_layers_for_feed(
+        self,
+        feed_id: str,
+        layer_kind: str,
+        expected_name: str = "",
+    ) -> None:
+        for layer in self._project_layers_for_feed(
+            feed_id,
+            layer_kind,
+            expected_name=expected_name,
+        ):
+            self._remove_layer_from_project(layer)
+
+    def _remove_all_plugin_ephemeral_layers(self) -> None:
+        for layer in list(QgsProject.instance().mapLayers().values()):
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+            if not self._is_plugin_ephemeral_layer(layer):
+                continue
+            self._remove_layer_from_project(layer)
+
     def _ensure_layer(self, feed: FeedConfig) -> QgsVectorLayer:
         layer = self._cached_layer(self._layers, feed.feed_id)
         wants_polygon = feed.symbol_mode in {"vessel", "vehicle"}
+        expected_name = f"UDP Nav - {feed.name}"
 
         if layer is not None:
             try:
@@ -646,8 +822,32 @@ class LayerManager:
                 self._remove_layer_from_project(layer)
                 self._layers.pop(feed.feed_id, None)
 
+        if layer is None:
+            layer = self._adopt_existing_project_layer(
+                feed.feed_id,
+                _LAYER_KIND_LIVE,
+                expected_name,
+            )
+            if layer is not None:
+                try:
+                    is_polygon = (
+                        QgsWkbTypes.geometryType(layer.wkbType())
+                        == QgsWkbTypes.PolygonGeometry
+                    )
+                except RuntimeError:
+                    is_polygon = not wants_polygon
+
+                if is_polygon != wants_polygon:
+                    self._remove_layer_from_project(layer)
+                    layer = None
+                else:
+                    layer.setName(expected_name)
+                    layer.renderer().setSymbol(self._create_symbol(feed))
+                    self._layers[feed.feed_id] = layer
+                    return layer
+
         layer_uri = "Polygon?crs=EPSG:4326" if wants_polygon else "Point?crs=EPSG:4326"
-        layer = QgsVectorLayer(layer_uri, f"UDP Nav - {feed.name}", "memory")
+        layer = QgsVectorLayer(layer_uri, expected_name, "memory")
         provider = layer.dataProvider()
         provider.addAttributes(
             [
@@ -666,6 +866,7 @@ class LayerManager:
 
         layer.renderer().setSymbol(self._create_symbol(feed))
         self._mark_ephemeral_layer(layer)
+        self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_LIVE)
         QgsProject.instance().addMapLayer(layer)
         self._layers[feed.feed_id] = layer
         return layer
@@ -739,9 +940,21 @@ class LayerManager:
         if layer is not None:
             return layer
 
+        expected_name = f"UDP Nav - {feed.name} (overview)"
+        layer = self._adopt_existing_project_layer(
+            feed.feed_id,
+            _LAYER_KIND_OVERVIEW,
+            expected_name,
+        )
+        if layer is not None:
+            layer.setName(expected_name)
+            layer.renderer().setSymbol(self._create_overview_symbol(feed))
+            self._overview_layers[feed.feed_id] = layer
+            return layer
+
         layer = QgsVectorLayer(
             "Point?crs=EPSG:4326",
-            f"UDP Nav - {feed.name} (overview)",
+            expected_name,
             "memory",
         )
         provider = layer.dataProvider()
@@ -756,6 +969,7 @@ class LayerManager:
 
         layer.renderer().setSymbol(self._create_overview_symbol(feed))
         self._mark_ephemeral_layer(layer)
+        self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_OVERVIEW)
         QgsProject.instance().addMapLayer(layer, False)
         self._overview_layers[feed.feed_id] = layer
         return layer
@@ -765,9 +979,21 @@ class LayerManager:
         if layer is not None:
             return layer
 
+        expected_name = f"UDP Nav - {feed.name} (track)"
+        layer = self._adopt_existing_project_layer(
+            feed.feed_id,
+            _LAYER_KIND_TRACK,
+            expected_name,
+        )
+        if layer is not None:
+            layer.setName(expected_name)
+            layer.renderer().setSymbol(self._create_track_symbol(feed.color_hex))
+            self._track_layers[feed.feed_id] = layer
+            return layer
+
         layer = QgsVectorLayer(
             "LineString?crs=EPSG:4326",
-            f"UDP Nav - {feed.name} (track)",
+            expected_name,
             "memory",
         )
         provider = layer.dataProvider()
@@ -785,13 +1011,20 @@ class LayerManager:
 
         layer.renderer().setSymbol(self._create_track_symbol(feed.color_hex))
         self._mark_ephemeral_layer(layer)
+        self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_TRACK)
         QgsProject.instance().addMapLayer(layer)
         self._track_layers[feed.feed_id] = layer
         return layer
 
     def _remove_overview_layer(self, feed_id: str) -> None:
         layer = self._cached_layer(self._overview_layers, feed_id)
+        layer_name = layer.name() if layer is not None else ""
         self._overview_layers.pop(feed_id, None)
+        self._remove_project_layers_for_feed(
+            feed_id,
+            _LAYER_KIND_OVERVIEW,
+            expected_name=layer_name,
+        )
         self._remove_layer_from_project(layer)
 
     @staticmethod
@@ -854,7 +1087,6 @@ class LayerManager:
         track_depth_m: Optional[float],
     ) -> None:
         if not track_enabled:
-            self.clear_track(feed.feed_id)
             return
 
         latitude = event.latitude
@@ -868,18 +1100,73 @@ class LayerManager:
             track_depth_m,
         )
 
-        points = self._track_points.setdefault(feed.feed_id, [])
+        feed_id = feed.feed_id
+        points = self._track_points.setdefault(feed_id, [])
         points.append((float(latitude), float(longitude), depth_m))
+
+        # --- Incremental local-XY and raw length (Phase 1) ---
+        origin = self._track_origin.get(feed_id)
+        local_xy = self._track_local_xy.setdefault(feed_id, [])
+
+        if origin is None:
+            origin = (float(latitude), float(longitude))
+            self._track_origin[feed_id] = origin
+            local_xy.clear()
+            self._track_raw_length[feed_id] = 0.0
+
+        z_m = float(depth_m) if track_use_depth_3d else 0.0
+        x_m, y_m = self._latlon_to_local_xy(origin[0], origin[1], latitude, longitude)
+        local_xy.append((x_m, y_m, z_m))
+
+        # Add new segment length to running total
+        raw_length = self._track_raw_length.get(feed_id, 0.0)
+        if len(local_xy) >= 2:
+            prev = local_xy[-2]
+            dx = x_m - prev[0]
+            dy = y_m - prev[1]
+            dz = (z_m - prev[2]) if track_use_depth_3d else 0.0
+            raw_length += math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        # FIFO trim - subtract removed segment from raw length
         if len(points) > _TRACK_MAX_POINTS:
-            del points[: len(points) - _TRACK_MAX_POINTS]
+            trim_count = len(points) - _TRACK_MAX_POINTS
+            for i in range(trim_count):
+                if len(local_xy) > 1:
+                    p0 = local_xy[0]
+                    p1 = local_xy[1]
+                    dx = p1[0] - p0[0]
+                    dy = p1[1] - p0[1]
+                    dz = (p1[2] - p0[2]) if track_use_depth_3d else 0.0
+                    raw_length -= math.sqrt(dx * dx + dy * dy + dz * dz)
+                    raw_length = max(0.0, raw_length)
+                del local_xy[0]
+            del points[:trim_count]
 
-        raw_length_m, smoothed_length_m = self._calculate_track_lengths(
-            points,
-            use_depth_3d=track_use_depth_3d,
-        )
-        self._track_lengths[feed.feed_id] = (raw_length_m, smoothed_length_m)
-        self._track_dimensions[feed.feed_id] = "3d" if track_use_depth_3d else "2d"
+        self._track_raw_length[feed_id] = raw_length
 
+        # Smoothed length from cached local XY
+        smoothed_length_m = self._compute_smoothed_length(local_xy, track_use_depth_3d)
+
+        self._track_lengths[feed_id] = (raw_length, smoothed_length_m)
+        self._track_dimensions[feed_id] = "3d" if track_use_depth_3d else "2d"
+
+        # --- Geometry rebuild throttle (Phase 2) ---
+        dirty = self._track_geometry_dirty.get(feed_id, 0) + 1
+        self._track_geometry_dirty[feed_id] = dirty
+
+        if dirty < _TRACK_GEOMETRY_REBUILD_INTERVAL and len(points) >= 10:
+            return
+
+        self._track_geometry_dirty[feed_id] = 0
+        self._rebuild_track_geometry(feed, points, raw_length, smoothed_length_m)
+
+    def _rebuild_track_geometry(
+        self,
+        feed: FeedConfig,
+        points: "List[Tuple[float, float, float]]",
+        raw_length_m: float,
+        smoothed_length_m: float,
+    ) -> None:
         layer = self._ensure_track_layer(feed)
         provider = layer.dataProvider()
         existing_ids = [feature.id() for feature in layer.getFeatures()]
@@ -896,7 +1183,7 @@ class LayerManager:
                     feed.name,
                     float(raw_length_m),
                     float(smoothed_length_m),
-                    self._track_dimensions[feed.feed_id],
+                    self._track_dimensions.get(feed.feed_id, "2d"),
                     len(points),
                 ]
             )
@@ -904,6 +1191,16 @@ class LayerManager:
 
         layer.updateExtents()
         layer.triggerRepaint()
+
+    def _compute_smoothed_length(
+        self,
+        local_xy: "List[Tuple[float, float, float]]",
+        use_depth_3d: bool,
+    ) -> float:
+        if len(local_xy) < 2:
+            return 0.0
+        smoothed = self._smooth_xyz(local_xy, _TRACK_SMOOTHING_WINDOW)
+        return self._polyline_length(smoothed, use_depth_3d)
 
     def _resolve_track_depth(
         self,

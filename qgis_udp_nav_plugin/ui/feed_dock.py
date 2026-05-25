@@ -1400,6 +1400,18 @@ class FeedDockWidget(QDockWidget):
     def set_rows(self, rows: list[dict]) -> None:
         selected_feed = self._selected_feed_id()
 
+        # Fast path: if same feed IDs in same order, update cells in-place
+        if self._table.rowCount() == len(rows):
+            same_structure = True
+            for i, row_data in enumerate(rows):
+                item = self._table.item(i, 0)
+                if item is None or item.text() != row_data.get("feed_id", ""):
+                    same_structure = False
+                    break
+            if same_structure:
+                self._update_rows_in_place(rows)
+                return
+
         blocked = self._table.blockSignals(True)
         self._table.setUpdatesEnabled(False)
         try:
@@ -1449,6 +1461,35 @@ class FeedDockWidget(QDockWidget):
             self._select_feed_row(selected_feed)
         if self._selected_feed_id() is None and self._table.rowCount() > 0:
             self._table.selectRow(0)
+
+        self._refresh_debug_panel()
+
+    def _update_rows_in_place(self, rows: list[dict]) -> None:
+        for row_index, row_data in enumerate(rows):
+            feed_id = row_data.get("feed_id", "")
+            self._rows_by_feed[feed_id] = dict(row_data)
+
+            icon_path = row_data.get("icon_path") or ""
+            symbol_display = row_data.get("symbol_summary") or ""
+            if not symbol_display and icon_path:
+                symbol_display = os.path.basename(icon_path)
+
+            values = [
+                feed_id,
+                row_data.get("name", ""),
+                row_data.get("bind_host", ""),
+                str(row_data.get("port", "")),
+                row_data.get("checksum_policy", ""),
+                row_data.get("status", ""),
+                row_data.get("message", ""),
+                row_data.get("color_hex", ""),
+                symbol_display,
+            ]
+
+            for col, value in enumerate(values):
+                item = self._table.item(row_index, col)
+                if item is None or item.text() != value:
+                    self._table.setItem(row_index, col, QTableWidgetItem(value))
 
         self._refresh_debug_panel()
 

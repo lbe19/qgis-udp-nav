@@ -28,9 +28,17 @@ class SentencePipeline:
         payload: str,
         source_address: str = "",
     ) -> List[object]:
+        return self.parse_lines(feed_config, split_datagram(payload), source_address)
+
+    def parse_lines(
+        self,
+        feed_config: FeedConfig,
+        lines: List[str],
+        source_address: str = "",
+    ) -> List[object]:
         events: List[object] = []
 
-        for line in split_datagram(payload):
+        for line in lines:
             try:
                 sentence = parse_sentence(line)
             except ValueError as exc:

@@ -9,6 +9,7 @@ import uuid
 from typing import Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
+from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -40,7 +41,7 @@ _SUBFEED_ROLES = {"vessel", "vehicle"}
 _KEEP_CENTER_MODES = {"vessel", "vehicle", "group"}
 _GROUP_DEFAULT_MAX_AGE_SEC = 15
 _LIVE_SNAPSHOT_MIN_INTERVAL_SEC = 0.2
-_AUTO_SAVE_LAYER_REFRESH_DEBOUNCE_MS = 300
+_SHUTDOWN_WORKER_WAIT_MS = 2500
 
 
 def _queued_connection_type():
@@ -83,10 +84,6 @@ class FeedController(QObject):
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
         self._keep_center_source_ids: List[str] = []
-        self._saved_tracks_refresh_timer = QTimer(self)
-        self._saved_tracks_refresh_timer.setSingleShot(True)
-        self._saved_tracks_refresh_timer.setInterval(_AUTO_SAVE_LAYER_REFRESH_DEBOUNCE_MS)
-        self._saved_tracks_refresh_timer.timeout.connect(self._refresh_saved_tracks_layer)
         self._log_dir = self._initialize_log_dir()
         self._startup_mode = self._settings.load_startup_mode()
 
@@ -387,6 +384,59 @@ class FeedController(QObject):
         for feed_id in list(self._workers.keys()):
             self.stop_feed(feed_id, force=force)
 
+    def _collect_track_entries(self, base_feed_ids: Optional[List[str]] = None) -> List[dict]:
+        if base_feed_ids is None:
+            requested_feed_ids = [feed.feed_id for feed in self.feeds()]
+        else:
+            requested_feed_ids = []
+            for feed_id in base_feed_ids:
+                candidate = str(feed_id or "").strip()
+                if not candidate or candidate in requested_feed_ids:
+                    continue
+                requested_feed_ids.append(candidate)
+
+        entries: List[dict] = []
+        for base_feed_id in requested_feed_ids:
+            feed = self._feeds.get(base_feed_id)
+            if feed is None:
+                continue
+
+            if feed.split_subfeeds_enabled:
+                for role in ("vessel", "vehicle"):
+                    track_layer_id = self._subfeed_layer_id(base_feed_id, role)
+                    track = self._layer_manager.track_snapshot(track_layer_id)
+                    if track is None:
+                        continue
+
+                    entries.append(
+                        {
+                            "feed_id": base_feed_id,
+                            "feed_name": feed.name,
+                            "role": role,
+                            "track_layer_id": track_layer_id,
+                            "track_color_hex": self._track_color_for_role(feed, role),
+                            "track": track,
+                        }
+                    )
+                continue
+
+            track = self._layer_manager.track_snapshot(base_feed_id)
+            if track is None:
+                continue
+
+            entries.append(
+                {
+                    "feed_id": base_feed_id,
+                    "feed_name": feed.name,
+                    "role": "vessel",
+                    "track_layer_id": base_feed_id,
+                    "track_color_hex": self._track_color_for_role(feed, "vessel"),
+                    "track": track,
+                }
+            )
+
+        return entries
+
     def save_tracks(self, feed_id: str, planned_number: str, actual_number: str) -> None:
         base_feed_id = str(feed_id or "").strip()
         if not base_feed_id:
@@ -396,37 +446,7 @@ class FeedController(QObject):
         if feed is None:
             return
 
-        entries: List[dict] = []
-        if feed.split_subfeeds_enabled:
-            for role in ("vessel", "vehicle"):
-                layer_id = self._subfeed_layer_id(base_feed_id, role)
-                track = self._layer_manager.track_snapshot(layer_id)
-                if track is None:
-                    continue
-
-                entries.append(
-                    {
-                        "feed_id": base_feed_id,
-                        "feed_name": feed.name,
-                        "role": role,
-                        "track_layer_id": layer_id,
-                        "track_color_hex": self._track_color_for_role(feed, role),
-                        "track": track,
-                    }
-                )
-        else:
-            track = self._layer_manager.track_snapshot(base_feed_id)
-            if track is not None:
-                entries.append(
-                    {
-                        "feed_id": base_feed_id,
-                        "feed_name": feed.name,
-                        "role": "vessel",
-                        "track_layer_id": base_feed_id,
-                        "track_color_hex": self._track_color_for_role(feed, "vessel"),
-                        "track": track,
-                    }
-                )
+        entries = self._collect_track_entries([base_feed_id])
 
         if not entries:
             self._on_worker_status(base_feed_id, "warning", "No active tracks available to save")
@@ -447,6 +467,56 @@ class FeedController(QObject):
             "info",
             f"Saved {saved_count} track(s) to UDP Nav - Saved Tracks ({output_name})",
         )
+
+    def prompt_save_tracks_before_shutdown(self, parent=None) -> bool:
+        if self._shutting_down:
+            return True
+
+        entries = self._collect_track_entries()
+        if not entries:
+            return True
+
+        track_count = len(entries)
+        feed_count = len({str(entry.get("feed_id") or "").strip() for entry in entries})
+
+        dialog = QMessageBox(parent)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("QGIS UDP Nav")
+        dialog.setText("Unsaved track data was found.")
+        dialog.setInformativeText(
+            f"Save {track_count} track(s) from {feed_count} feed(s) before closing?"
+        )
+        dialog.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        dialog.setDefaultButton(QMessageBox.Save)
+
+        selected = dialog.exec()
+        if selected == QMessageBox.Cancel:
+            return False
+        if selected == QMessageBox.Discard:
+            return True
+
+        saved_count, file_path = self._layer_manager.save_tracks(
+            entries,
+            planned_number="",
+            actual_number="",
+        )
+        if saved_count <= 0:
+            QMessageBox.warning(
+                parent,
+                "QGIS UDP Nav",
+                "Failed to save tracks. Close was canceled to avoid data loss.",
+            )
+            return False
+
+        output_name = os.path.basename(file_path) if file_path else "saved_tracks.geojson"
+        first_feed_id = str(entries[0].get("feed_id") or "").strip()
+        if first_feed_id:
+            self._on_worker_status(
+                first_feed_id,
+                "info",
+                f"Saved {saved_count} track(s) to UDP Nav - Saved Tracks ({output_name})",
+            )
+        return True
 
     def set_track_enabled(self, feed_id: str, role: str, enabled: bool) -> None:
         base_feed_id = str(feed_id or "").strip()
@@ -473,51 +543,12 @@ class FeedController(QObject):
                 return
 
             current_enabled = bool(feed.vehicle_track_enabled)
-            track_layer_id = self._subfeed_layer_id(base_feed_id, "vehicle")
         else:
             current_enabled = bool(feed.vessel_track_enabled)
-            if feed.split_subfeeds_enabled:
-                track_layer_id = self._subfeed_layer_id(base_feed_id, "vessel")
-            else:
-                track_layer_id = base_feed_id
 
         changed = False
 
         if not requested_enabled:
-            auto_saved_output = ""
-            track_snapshot = self._layer_manager.track_snapshot(track_layer_id)
-            if track_snapshot is not None:
-                saved_count, file_path = self._layer_manager.save_tracks(
-                    [
-                        {
-                            "feed_id": base_feed_id,
-                            "feed_name": feed.name,
-                            "role": selected_role,
-                            "track_layer_id": track_layer_id,
-                            "track_color_hex": self._track_color_for_role(feed, selected_role),
-                            "track": track_snapshot,
-                        }
-                    ],
-                    planned_number="",
-                    actual_number="",
-                    refresh_saved_layer=False,
-                )
-                if saved_count <= 0:
-                    self._on_worker_status(
-                        base_feed_id,
-                        "error",
-                        f"Failed to auto-save {selected_role} track; track remains active",
-                    )
-                    self._emit_snapshot()
-                    return
-
-                auto_saved_output = (
-                    os.path.basename(file_path) if file_path else "saved_tracks.geojson"
-                )
-                self._schedule_saved_tracks_refresh()
-
-            self._layer_manager.clear_track(track_layer_id)
-
             if current_enabled:
                 if selected_role == "vehicle":
                     feed.vehicle_track_enabled = False
@@ -528,16 +559,11 @@ class FeedController(QObject):
             if changed:
                 self._persist()
 
-            if auto_saved_output:
-                message = (
-                    f"{selected_role.capitalize()} track disabled "
-                    f"(auto-saved to {auto_saved_output})"
-                )
-            else:
-                message = f"{selected_role.capitalize()} track disabled"
-
-            self._on_worker_status(base_feed_id, "info", message)
-            self._emit_snapshot()
+            self._on_worker_status(
+                base_feed_id,
+                "info",
+                f"{selected_role.capitalize()} track disabled (retained in memory)",
+            )
             return
 
         if not current_enabled:
@@ -555,15 +581,6 @@ class FeedController(QObject):
             "info",
             f"{selected_role.capitalize()} track enabled",
         )
-        self._emit_snapshot()
-
-    def _schedule_saved_tracks_refresh(self) -> None:
-        if self._saved_tracks_refresh_timer.isActive():
-            self._saved_tracks_refresh_timer.stop()
-        self._saved_tracks_refresh_timer.start()
-
-    def _refresh_saved_tracks_layer(self) -> None:
-        self._layer_manager.refresh_saved_tracks_layer()
 
     def start_feed(self, feed_id: str) -> None:
         if self._shutting_down or self._project_transition_active:
@@ -613,6 +630,34 @@ class FeedController(QObject):
             thread.deleteLater()
 
         self._on_worker_status(feed_id, "idle", "Stopped")
+
+    def _stop_all_workers_fast(self, force: bool = True) -> None:
+        workers = self._workers
+        threads = self._threads
+        self._workers = {}
+        self._threads = {}
+
+        if not threads and not workers:
+            return
+
+        for thread in threads.values():
+            thread.requestInterruption()
+
+        connection_type = _queued_connection_type()
+        for worker in workers.values():
+            QMetaObject.invokeMethod(worker, "stop", connection_type)
+
+        for thread in threads.values():
+            thread.quit()
+
+        deadline = time.monotonic() + (_SHUTDOWN_WORKER_WAIT_MS / 1000.0)
+        for thread in threads.values():
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
+            stopped = thread.wait(remaining_ms)
+            if force and not stopped:
+                thread.terminate()
+                thread.wait(500)
+            thread.deleteLater()
 
     def set_keep_center_target(
         self,
@@ -679,7 +724,7 @@ class FeedController(QObject):
         self._shutting_down = True
         self._project_transition_active = False
         self._project_transition_resume_feed_ids = []
-        self.stop_all(force=True)
+        self._stop_all_workers_fast(force=True)
         self._layer_manager.clear()
         self._latest_heading.clear()
         self._telemetry_by_layer.clear()
@@ -742,7 +787,24 @@ class FeedController(QObject):
             except OSError:
                 pass
 
+        self._prune_old_logs(log_dir)
         return log_dir
+
+    @staticmethod
+    def _prune_old_logs(log_dir: str, retention_days: int = 30) -> None:
+        try:
+            cutoff = time.time() - (retention_days * 86400)
+            for name in os.listdir(log_dir):
+                if not name.lower().endswith(".log"):
+                    continue
+                file_path = os.path.join(log_dir, name)
+                try:
+                    if os.path.getmtime(file_path) < cutoff:
+                        os.remove(file_path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     @staticmethod
     def _safe_file_component(value: str) -> str:

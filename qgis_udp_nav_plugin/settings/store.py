@@ -16,6 +16,7 @@ class SettingsStore:
     FEEDS_KEY = f"{PREFIX}/feeds"
     VESSEL_PROFILES_KEY = f"{PREFIX}/vessel_profiles"
     STARTUP_MODE_KEY = f"{PREFIX}/startup_mode"
+    DIAGNOSTIC_LOGGING_KEY = f"{PREFIX}/diagnostic_logging"
     STARTUP_MODES = {"off", "first", "all"}
     DEFAULT_STARTUP_MODE = "first"
 
@@ -94,6 +95,13 @@ class SettingsStore:
         if normalized not in self.STARTUP_MODES:
             normalized = self.DEFAULT_STARTUP_MODE
         self._settings.setValue(self.STARTUP_MODE_KEY, normalized)
+
+    def load_diagnostic_logging(self) -> bool:
+        raw = self._settings.value(self.DIAGNOSTIC_LOGGING_KEY, "false")
+        return str(raw).strip().lower() in {"true", "1", "yes"}
+
+    def save_diagnostic_logging(self, enabled: bool) -> None:
+        self._settings.setValue(self.DIAGNOSTIC_LOGGING_KEY, "true" if enabled else "false")
 
     @staticmethod
     def _default_feed() -> FeedConfig:

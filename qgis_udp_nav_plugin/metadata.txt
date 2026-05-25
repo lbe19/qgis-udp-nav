@@ -12,6 +12,6 @@ tracker=https://github.com/lbert1858/qgis-udp-nav/issues
 repository=https://github.com/lbert1858/qgis-udp-nav
 license=ISC
 category=Plugins
-icon=
+icon=icons/udp_nav.svg
 experimental=False
 deprecated=False

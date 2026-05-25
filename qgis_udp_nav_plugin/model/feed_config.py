@@ -89,6 +89,8 @@ class FeedConfig:
             raise ValueError("name is required")
         if self.port <= 0 or self.port > 65535:
             raise ValueError("port must be in range 1-65535")
+        if self.stale_timeout_sec < 1:
+            raise ValueError("stale_timeout_sec must be at least 1")
         if self.checksum_policy not in CHECKSUM_POLICIES:
             raise ValueError(
                 f"checksum_policy must be one of {sorted(CHECKSUM_POLICIES)}"

@@ -68,6 +68,11 @@ class UdpFeedWorker(QObject):
         address = QHostAddress(self._config.bind_host)
         if address.isNull():
             address = _fallback_any_ipv4_address()
+            self.status.emit(
+                self._config.feed_id,
+                "warning",
+                f"Invalid bind address '{self._config.bind_host}', falling back to 0.0.0.0",
+            )
 
         flags = _bind_flags()
         bind_ok = self._socket.bind(address, self._config.port, flags)
@@ -137,12 +142,13 @@ class UdpFeedWorker(QObject):
             self._stale_reported = False
 
             text = payload.decode("ascii", errors="replace")
-            for line in split_datagram(text):
+            lines = split_datagram(text)
+            for line in lines:
                 self.sentence_received.emit(self._config.feed_id, source_address, line)
 
-            events = self._pipeline.parse_datagram(
+            events = self._pipeline.parse_lines(
                 self._config,
-                text,
+                lines,
                 source_address=source_address,
             )
             for event in events:

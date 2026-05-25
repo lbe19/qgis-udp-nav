@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtWidgets import QAction, QApplication
 from qgis.core import QgsProject
 
 from .controller import FeedController
@@ -17,6 +19,10 @@ def _right_dock_area():
     return Qt.RightDockWidgetArea
 
 
+def _plugin_icon_path() -> str:
+    return str(Path(__file__).resolve().parent / "icons" / "udp_nav.svg")
+
+
 class QgisUdpNavPlugin:
     def __init__(self, iface) -> None:
         self.iface = iface
@@ -24,20 +30,31 @@ class QgisUdpNavPlugin:
         self._dock: Optional[FeedDockWidget] = None
         self._controller: Optional[FeedController] = None
         self._project_signal_connections: List[Tuple[object, object]] = []
+        self._ui_signal_connections: List[Tuple[object, object]] = []
         self._pending_initial_autostart = False
         self._initial_project_transition_pending = False
         self._project_transition_watchdog_token = 0
 
     def initGui(self) -> None:
-        self._action = QAction("QGIS UDP Nav", self.iface.mainWindow())
+        self._action = QAction(QIcon(_plugin_icon_path()), "QGIS UDP Nav", self.iface.mainWindow())
+        self._action.setObjectName("qgis_udp_nav_action")
+        self._action.setToolTip("Open QGIS UDP Nav")
         self._action.triggered.connect(self.show_dock)
 
         self.iface.addPluginToMenu("&QGIS UDP Nav", self._action)
         self.iface.addToolBarIcon(self._action)
+        self._connect_ui_lifecycle_signals()
+        self._schedule_action_restore(0)
+        self._schedule_action_restore(900)
 
         self._ensure_initialized()
 
     def unload(self) -> None:
+        if self._controller is not None:
+            if not self._controller.prompt_save_tracks_before_shutdown(self.iface.mainWindow()):
+                return
+
+        self._disconnect_ui_lifecycle_signals()
         self._disconnect_project_lifecycle_signals()
         self._pending_initial_autostart = False
         self._initial_project_transition_pending = False
@@ -137,6 +154,68 @@ class QgisUdpNavPlugin:
 
         self._controller.start_feed(selected_feed.feed_id)
         self._pending_initial_autostart = False
+
+    def _connect_ui_lifecycle_signals(self) -> None:
+        if self._ui_signal_connections:
+            return
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        self._connect_ui_signal(app, "applicationStateChanged", self._on_application_state_changed)
+
+    def _disconnect_ui_lifecycle_signals(self) -> None:
+        for signal, handler in self._ui_signal_connections:
+            try:
+                signal.disconnect(handler)
+            except (TypeError, RuntimeError):
+                pass
+
+        self._ui_signal_connections = []
+
+    def _connect_ui_signal(self, source, signal_name: str, handler) -> None:
+        signal = getattr(source, signal_name, None)
+        connect = getattr(signal, "connect", None)
+        if not callable(connect):
+            return
+
+        try:
+            connect(handler)
+        except TypeError:
+            return
+
+        self._ui_signal_connections.append((signal, handler))
+
+    def _on_application_state_changed(self, state) -> None:
+        active_state = getattr(Qt, "ApplicationActive", None)
+        if active_state is None:
+            app_state_enum = getattr(Qt, "ApplicationState", None)
+            active_state = getattr(app_state_enum, "ApplicationActive", None)
+
+        if active_state is not None and state != active_state:
+            return
+
+        # Some Windows lock/unlock transitions are asynchronous in Qt; restore twice.
+        self._schedule_action_restore(0)
+        self._schedule_action_restore(900)
+
+    def _schedule_action_restore(self, delay_ms: int) -> None:
+        QTimer.singleShot(max(0, int(delay_ms)), self._restore_plugin_action)
+
+    def _restore_plugin_action(self) -> None:
+        action = self._action
+        if action is None:
+            return
+
+        if action.icon().isNull():
+            action.setIcon(QIcon(_plugin_icon_path()))
+
+        # Re-register defensively so the button returns if the toolbar rebuilt.
+        self.iface.removePluginMenu("&QGIS UDP Nav", action)
+        self.iface.removeToolBarIcon(action)
+        self.iface.addPluginToMenu("&QGIS UDP Nav", action)
+        self.iface.addToolBarIcon(action)
 
     def _connect_project_lifecycle_signals(self) -> None:
         if self._project_signal_connections:

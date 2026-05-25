@@ -146,12 +146,14 @@ Delete the plugin folder from your QGIS profile plugins directory, then restart 
 - Length estimates:
   - raw polyline length
   - smoothed length (moving-average based path smoothing)
-- Turning a track toggle off auto-saves that active role track to Saved Tracks, then clears it.
+- Turning a track toggle off pauses capture for that role and retains the collected track in memory.
+- Tracks are saved only when Save Tracks is triggered.
 
 ### Persistent Saved Tracks
 
 - Save Tracks button exports current active tracks into one persistent saved layer.
 - For split feeds, vessel and vehicle are saved as separate features in the same layer.
+- On plugin unload/exit, unsaved in-memory tracks trigger a Save/Discard/Cancel prompt.
 - Prompted metadata on save:
   - planned number
   - actual number
