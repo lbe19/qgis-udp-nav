@@ -81,6 +81,7 @@ class FeedConfig:
     reference_lon: Optional[float] = None
     reference_heading_deg: Optional[float] = None
     stale_timeout_sec: int = 5
+    track_max_speed_ms: float = 0.0  # 0 = disabled; typical ROV: 3.0
 
     def validate(self) -> None:
         if not self.feed_id:
@@ -213,6 +214,7 @@ class FeedConfig:
             "reference_lon": self.reference_lon,
             "reference_heading_deg": self.reference_heading_deg,
             "stale_timeout_sec": self.stale_timeout_sec,
+            "track_max_speed_ms": self.track_max_speed_ms,
         }
 
     @classmethod
@@ -376,6 +378,7 @@ class FeedConfig:
                 else None
             ),
             stale_timeout_sec=int(data.get("stale_timeout_sec", 5)),
+            track_max_speed_ms=float(data.get("track_max_speed_ms", 0.0)),
         )
         config.validate()
         return config

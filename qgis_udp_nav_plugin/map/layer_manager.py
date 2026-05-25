@@ -6,6 +6,7 @@ import html
 import math
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -70,6 +71,8 @@ class LayerManager:
         self._track_raw_length: Dict[str, float] = {}
         # Geometry rebuild throttle state (Phase 2)
         self._track_geometry_dirty: Dict[str, int] = {}
+        # Speed gate: last accepted fix per feed (lat, lon, monotonic_ts)
+        self._track_last_accepted: Dict[str, Tuple[float, float, float]] = {}
         # Live position feature ID cache (Phase 5)
         self._live_feature_id: Dict[str, int] = {}
         self._heading_by_feed: Dict[str, float] = {}
@@ -334,6 +337,7 @@ class LayerManager:
         self._track_local_xy.pop(feed_id, None)
         self._track_raw_length.pop(feed_id, None)
         self._track_geometry_dirty.pop(feed_id, None)
+        self._track_last_accepted.pop(feed_id, None)
 
         self._remove_layer_from_project(layer)
 
@@ -664,6 +668,7 @@ class LayerManager:
         self._track_local_xy.pop(feed_id, None)
         self._track_raw_length.pop(feed_id, None)
         self._track_geometry_dirty.pop(feed_id, None)
+        self._track_last_accepted.pop(feed_id, None)
 
         self._remove_project_layers_for_feed(
             feed_id,
@@ -709,6 +714,7 @@ class LayerManager:
         self._track_local_xy.clear()
         self._track_raw_length.clear()
         self._track_geometry_dirty.clear()
+        self._track_last_accepted.clear()
         self._live_feature_id.clear()
         self._heading_by_feed.clear()
         self._position_by_feed.clear()
@@ -1101,6 +1107,11 @@ class LayerManager:
         )
 
         feed_id = feed.feed_id
+
+        # --- Speed gate: reject implausible jumps (e.g. HiPAP fallout) ---
+        if not self._passes_speed_gate(feed, latitude, longitude):
+            return
+
         points = self._track_points.setdefault(feed_id, [])
         points.append((float(latitude), float(longitude), depth_m))
 
@@ -1143,6 +1154,7 @@ class LayerManager:
             del points[:trim_count]
 
         self._track_raw_length[feed_id] = raw_length
+        self._track_last_accepted[feed_id] = (float(latitude), float(longitude), time.monotonic())
 
         # Smoothed length from cached local XY
         smoothed_length_m = self._compute_smoothed_length(local_xy, track_use_depth_3d)
@@ -1159,6 +1171,41 @@ class LayerManager:
 
         self._track_geometry_dirty[feed_id] = 0
         self._rebuild_track_geometry(feed, points, raw_length, smoothed_length_m)
+
+    def _passes_speed_gate(
+        self, feed: "FeedConfig", latitude: float, longitude: float
+    ) -> bool:
+        max_speed = feed.track_max_speed_ms
+        if max_speed <= 0.0:
+            return True  # Gate disabled
+
+        feed_id = feed.feed_id
+        prev = self._track_last_accepted.get(feed_id)
+        if prev is None:
+            # First fix — always accept
+            self._track_last_accepted[feed_id] = (
+                float(latitude), float(longitude), time.monotonic()
+            )
+            return True
+
+        prev_lat, prev_lon, prev_ts = prev
+        now = time.monotonic()
+        dt = now - prev_ts
+        if dt < 0.01:
+            return True  # Near-simultaneous — accept
+
+        dist_m = self._equirect_distance_m(prev_lat, prev_lon, latitude, longitude)
+        speed = dist_m / dt
+        return speed <= max_speed
+
+    @staticmethod
+    def _equirect_distance_m(
+        lat1: float, lon1: float, lat2: float, lon2: float
+    ) -> float:
+        mean_lat = math.radians((float(lat1) + float(lat2)) / 2.0)
+        dx = (float(lon2) - float(lon1)) * 111320.0 * math.cos(mean_lat)
+        dy = (float(lat2) - float(lat1)) * 111320.0
+        return math.sqrt(dx * dx + dy * dy)
 
     def _rebuild_track_geometry(
         self,
