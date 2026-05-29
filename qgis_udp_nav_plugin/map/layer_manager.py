@@ -1367,8 +1367,52 @@ class LayerManager:
     ) -> float:
         if len(local_xy) < 2:
             return 0.0
-        smoothed = self._smooth_xyz(local_xy, _TRACK_SMOOTHING_WINDOW)
+        filtered = self._reject_spikes(local_xy, use_depth_3d)
+        if len(filtered) < 2:
+            return 0.0
+        smoothed = self._smooth_xyz(filtered, _TRACK_SMOOTHING_WINDOW)
         return self._polyline_length(smoothed, use_depth_3d)
+
+    @staticmethod
+    def _reject_spikes(
+        points: "List[Tuple[float, float, float]]",
+        use_depth_3d: bool,
+        threshold_factor: float = 5.0,
+    ) -> "List[Tuple[float, float, float]]":
+        """Remove outlier points whose adjacent segment distances both exceed
+        threshold_factor * median_segment_distance.  This filters HiPAP dropout
+        teleports (jump to vessel center and back) from the smoothed path."""
+        n = len(points)
+        if n < 4:
+            return list(points)
+
+        # Compute all segment distances
+        seg_dists = [0.0] * (n - 1)
+        for i in range(n - 1):
+            dx = points[i + 1][0] - points[i][0]
+            dy = points[i + 1][1] - points[i][1]
+            dz = (points[i + 1][2] - points[i][2]) if use_depth_3d else 0.0
+            seg_dists[i] = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        # Find median segment distance
+        sorted_dists = sorted(seg_dists)
+        mid = len(sorted_dists) // 2
+        if len(sorted_dists) % 2 == 0:
+            median_dist = (sorted_dists[mid - 1] + sorted_dists[mid]) / 2.0
+        else:
+            median_dist = sorted_dists[mid]
+
+        # Threshold: if median is tiny, use an absolute minimum to avoid
+        # rejecting everything in a nearly-stationary track
+        threshold = max(median_dist * threshold_factor, 0.5)
+
+        # Mark interior points as spikes if BOTH adjacent segments exceed threshold
+        keep = [True] * n
+        for i in range(1, n - 1):
+            if seg_dists[i - 1] > threshold and seg_dists[i] > threshold:
+                keep[i] = False
+
+        return [p for p, k in zip(points, keep) if k]
 
     def _resolve_track_depth(
         self,
@@ -1406,7 +1450,8 @@ class LayerManager:
             xyz_points.append((x_m, y_m, z_m))
 
         raw_length = LayerManager._polyline_length(xyz_points, use_depth_3d)
-        smoothed_points = LayerManager._smooth_xyz(xyz_points, _TRACK_SMOOTHING_WINDOW)
+        filtered_points = LayerManager._reject_spikes(xyz_points, use_depth_3d)
+        smoothed_points = LayerManager._smooth_xyz(filtered_points, _TRACK_SMOOTHING_WINDOW)
         smoothed_length = LayerManager._polyline_length(smoothed_points, use_depth_3d)
         return raw_length, smoothed_length
 

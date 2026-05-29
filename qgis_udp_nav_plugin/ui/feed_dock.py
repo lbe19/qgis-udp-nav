@@ -1250,15 +1250,9 @@ class FeedDockWidget(QDockWidget):
         self._table.setEditTriggers(_no_edit_triggers())
         self._table.setWordWrap(False)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(0, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(1, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(2, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(3, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(4, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(5, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(6, _header_resize_mode("Stretch"))
-        header.setSectionResizeMode(7, _header_resize_mode("ResizeToContents"))
-        header.setSectionResizeMode(8, _header_resize_mode("ResizeToContents"))
+        header.setSectionResizeMode(_header_resize_mode("Interactive"))
+        header.setStretchLastSection(True)
+        self._table.resizeColumnsToContents()
 
         table_widget = QWidget(self)
         table_layout = QVBoxLayout(table_widget)
@@ -1459,6 +1453,8 @@ class FeedDockWidget(QDockWidget):
             self._table.blockSignals(blocked)
 
         self._prune_group_sources_from_rows()
+
+        self._table.resizeColumnsToContents()
 
         if selected_feed:
             self._select_feed_row(selected_feed)
@@ -2115,21 +2111,28 @@ class FeedDockWidget(QDockWidget):
         base_row = self._rows_by_feed.get(base_feed_id, {}) if base_feed_id else {}
         split_enabled = bool(base_row.get("split_subfeeds_enabled", False))
 
-        heading = row_data.get("heading_deg")
-        heading_source = str(row_data.get("heading_source") or "").strip()
-        speed_knots = row_data.get("speed_knots")
-        depth_m = row_data.get("depth_m")
-        track_row = row_data
-        track_role = "vehicle" if role == "vehicle" else "vessel"
+        # When split subfeeds is enabled, source heading/speed/depth from the
+        # role-specific subfeed row (using the track_live_role selector) rather
+        # than the selected table row — this avoids vessel data bleeding into
+        # the vehicle display when the parent row is selected.
+        telemetry_row = row_data
+        telemetry_role = role
         if split_enabled and base_feed_id:
             selected_track_role = self._track_live_role
             if selected_track_role not in {"vessel", "vehicle"}:
                 selected_track_role = "vessel"
             selected_track_id = f"{base_feed_id}:{selected_track_role}"
-            candidate_track_row = self._rows_by_feed.get(selected_track_id)
-            if isinstance(candidate_track_row, dict):
-                track_row = candidate_track_row
-                track_role = selected_track_role
+            candidate_row = self._rows_by_feed.get(selected_track_id)
+            if isinstance(candidate_row, dict):
+                telemetry_row = candidate_row
+                telemetry_role = selected_track_role
+
+        heading = telemetry_row.get("heading_deg")
+        heading_source = str(telemetry_row.get("heading_source") or "").strip()
+        speed_knots = telemetry_row.get("speed_knots")
+        depth_m = telemetry_row.get("depth_m")
+        track_row = telemetry_row
+        track_role = telemetry_role if telemetry_role in {"vessel", "vehicle"} else "vessel"
 
         track_enabled = bool(track_row.get("track_enabled", False))
         track_dimension = str(track_row.get("track_dimension") or "2d").strip().lower()
@@ -2141,14 +2144,14 @@ class FeedDockWidget(QDockWidget):
             if heading_source:
                 heading_text += f"\n{heading_source}"
         else:
-            heading_text = "Heading\n--"
+            heading_text = "Heading\nn/a" if telemetry_role == "vehicle" else "Heading\n--"
 
         if isinstance(speed_knots, (int, float)):
             speed_text = f"Speed\n{float(speed_knots):.2f} kn"
         else:
-            speed_text = "Speed\n--"
+            speed_text = "Speed\nn/a" if telemetry_role == "vehicle" else "Speed\n--"
 
-        if role == "vehicle":
+        if telemetry_role == "vehicle":
             if isinstance(depth_m, (int, float)):
                 depth_text = f"Depth\n{float(depth_m):.2f} m"
             else:

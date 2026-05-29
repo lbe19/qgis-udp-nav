@@ -76,6 +76,7 @@ class FeedController(QObject):
         self._vessel_profiles: Dict[str, dict] = self._settings.load_vessel_profiles()
         self._status_by_feed: Dict[str, Dict[str, str]] = {}
         self._latest_heading: Dict[str, Dict[str, object]] = {}
+        self._reference_heading_by_layer: Dict[str, float] = {}
         self._telemetry_by_layer: Dict[str, Dict[str, object]] = {}
         self._last_position_by_layer: Dict[str, Tuple[float, float, datetime]] = {}
         self._last_vehicle_fix_by_feed: Dict[str, datetime] = {}
@@ -1068,13 +1069,21 @@ class FeedController(QObject):
             heading = event.metadata.get("heading_deg") if isinstance(event.metadata, dict) else None
             if isinstance(heading, (int, float)):
                 heading_value = self._normalize_heading(float(heading))
-                self._set_heading(
-                    event.feed_id,
-                    role,
-                    heading_value,
-                    source=event.sentence_type,
-                    is_true=bool(event.metadata.get("heading_is_true", False)),
-                )
+                # PSIMSNS heading is the vessel's gyro heading (motion reference),
+                # NOT the vehicle's own heading.  Store it as a reference for
+                # PSIMSSB coordinate conversion but do NOT expose it as the
+                # vehicle's display heading.
+                if event.sentence_type.upper() == "PSIMSNS" and role == "vehicle":
+                    render_feed = self._render_feed(feed, role)
+                    self._reference_heading_by_layer[render_feed.feed_id] = heading_value
+                else:
+                    self._set_heading(
+                        event.feed_id,
+                        role,
+                        heading_value,
+                        source=event.sentence_type,
+                        is_true=bool(event.metadata.get("heading_is_true", False)),
+                    )
 
             adjusted_level = self._adjust_status_level(
                 role=role,
@@ -1240,10 +1249,8 @@ class FeedController(QObject):
                 try:
                     self._iface.mapCanvas().refresh()
                     if self._position_count <= 2:
-                        from ..diag import diag
                         diag(f"  canvas.refresh() called (position #{self._position_count})")
                 except Exception as e:
-                    from ..diag import diag
                     diag(f"  canvas.refresh() FAILED: {e}")
             # Deferred repaint as safety net: QGIS cache might not be invalidated
             # on the same event-loop tick the layer was created
@@ -1604,6 +1611,12 @@ class FeedController(QObject):
             heading = heading_state.get("heading_deg")
             if isinstance(heading, (int, float)):
                 return float(heading)
+
+        # Fallback: reference heading stored from PSIMSNS (vessel gyro)
+        for candidate_id in candidate_ids:
+            ref = self._reference_heading_by_layer.get(candidate_id)
+            if isinstance(ref, (int, float)):
+                return float(ref)
 
         if isinstance(feed.reference_heading_deg, (int, float)):
             return float(feed.reference_heading_deg)
