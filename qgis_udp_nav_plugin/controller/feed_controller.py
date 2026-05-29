@@ -93,7 +93,8 @@ class FeedController(QObject):
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
         self._keep_center_source_ids: List[str] = []
-        self._log_dir = self._initialize_log_dir()
+        self._sentence_logging_enabled = self._settings.load_sentence_logging()
+        self._log_dir = self._initialize_log_dir() if self._sentence_logging_enabled else ""
         self._log_buffer: List[Tuple[str, str]] = []
         self._log_flush_timer: Optional[QTimer] = None
         if self._log_dir:
@@ -792,6 +793,46 @@ class FeedController(QObject):
     def log_directory(self) -> str:
         return self._log_dir
 
+    def sentence_logging_enabled(self) -> bool:
+        return self._sentence_logging_enabled
+
+    def set_sentence_logging_enabled(self, enabled: bool, parent=None) -> bool:
+        """Toggle sentence-to-disk logging.  Returns True if the state changed."""
+        if enabled == self._sentence_logging_enabled:
+            return False
+
+        if enabled:
+            dialog = QMessageBox(parent)
+            dialog.setIcon(QMessageBox.Warning)
+            dialog.setWindowTitle("Enable Sentence Logging")
+            dialog.setText("This will log every received UDP sentence to disk.")
+            dialog.setInformativeText(
+                "At typical marine data rates this accumulates hundreds of "
+                "megabytes per day and will degrade performance over time.\n\n"
+                "Only enable this for short diagnostic sessions."
+            )
+            dialog.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+            dialog.setDefaultButton(QMessageBox.Cancel)
+            if dialog.exec() != QMessageBox.Ok:
+                return False
+
+            self._sentence_logging_enabled = True
+            if not self._log_dir:
+                self._log_dir = self._initialize_log_dir()
+            if self._log_dir and self._log_flush_timer is None:
+                self._log_flush_timer = QTimer(self)
+                self._log_flush_timer.setInterval(2000)
+                self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+                self._log_flush_timer.start()
+        else:
+            self._sentence_logging_enabled = False
+            if self._log_flush_timer is not None:
+                self._log_flush_timer.stop()
+            self._flush_log_buffer()
+
+        self._settings.save_sentence_logging(self._sentence_logging_enabled)
+        return True
+
     def _persist(self) -> None:
         self._settings.save_feeds(self.feeds())
 
@@ -1091,7 +1132,8 @@ class FeedController(QObject):
             self._sentence_rate_window_start = now_mono
         if self._sentence_rate <= _SENTENCE_STREAM_RATE_LIMIT:
             self.sentence_streamed.emit(feed_id, line)
-        self._append_log_line(feed_id, "SENTENCE", line)
+        if self._sentence_logging_enabled:
+            self._append_log_line(feed_id, "SENTENCE", line)
 
         # Parse on main thread (PyQt6 cannot deliver Python objects cross-thread)
         feed = self._feeds.get(feed_id)

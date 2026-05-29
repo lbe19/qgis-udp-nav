@@ -17,6 +17,7 @@ class SettingsStore:
     VESSEL_PROFILES_KEY = f"{PREFIX}/vessel_profiles"
     STARTUP_MODE_KEY = f"{PREFIX}/startup_mode"
     DIAGNOSTIC_LOGGING_KEY = f"{PREFIX}/diagnostic_logging"
+    SENTENCE_LOGGING_KEY = f"{PREFIX}/sentence_logging"
     STARTUP_MODES = {"off", "first", "all"}
     DEFAULT_STARTUP_MODE = "first"
 
@@ -102,6 +103,13 @@ class SettingsStore:
 
     def save_diagnostic_logging(self, enabled: bool) -> None:
         self._settings.setValue(self.DIAGNOSTIC_LOGGING_KEY, "true" if enabled else "false")
+
+    def load_sentence_logging(self) -> bool:
+        raw = self._settings.value(self.SENTENCE_LOGGING_KEY, "false")
+        return str(raw).strip().lower() in {"true", "1", "yes"}
+
+    def save_sentence_logging(self, enabled: bool) -> None:
+        self._settings.setValue(self.SENTENCE_LOGGING_KEY, "true" if enabled else "false")
 
     @staticmethod
     def _default_feed() -> FeedConfig:

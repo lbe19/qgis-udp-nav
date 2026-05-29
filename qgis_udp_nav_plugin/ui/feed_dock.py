@@ -1344,7 +1344,8 @@ class FeedDockWidget(QDockWidget):
 
         self._apply_info_cards_theme()
 
-        self._info_cards_widget.setVisible(False)
+        self._info_cards_widget.setVisible(True)
+        self._info_cards_button.setChecked(True)
 
         root_layout.addLayout(button_grid)
         root_layout.addWidget(splitter)
