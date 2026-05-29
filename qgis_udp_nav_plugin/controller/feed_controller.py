@@ -11,8 +11,10 @@ from typing import Dict, List, Optional, Tuple
 from qgis.PyQt.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsMessageLog,
     QgsPointXY,
     QgsProject,
 )
@@ -23,6 +25,7 @@ from ..model.feed_config import FeedConfig
 from ..parser.pipeline import SentencePipeline
 from ..settings.store import SettingsStore
 from ..transport.udp_feed_worker import UdpFeedWorker
+from ..diag import diag
 
 _AUTO_VESSEL_SENTENCE_TYPES = {
     "GGA",
@@ -42,6 +45,7 @@ _KEEP_CENTER_MODES = {"vessel", "vehicle", "group"}
 _GROUP_DEFAULT_MAX_AGE_SEC = 15
 _LIVE_SNAPSHOT_MIN_INTERVAL_SEC = 0.2
 _SHUTDOWN_WORKER_WAIT_MS = 2500
+_SENTENCE_STREAM_RATE_LIMIT = 50  # sentences/sec above which UI streaming is skipped
 
 
 def _queued_connection_type():
@@ -63,6 +67,8 @@ class FeedController(QObject):
         self._settings = SettingsStore()
         self._pipeline = SentencePipeline()
         self._layer_manager = LayerManager()
+        self._event_count = 0
+        self._position_count = 0
 
         self._feeds: Dict[str, FeedConfig] = {
             feed.feed_id: feed for feed in self._settings.load_feeds()
@@ -80,11 +86,21 @@ class FeedController(QObject):
         self._project_transition_active = False
         self._project_transition_resume_feed_ids: List[str] = []
         self._last_live_snapshot_monotonic = 0.0
+        self._sentence_counter = 0
+        self._sentence_rate = 0
+        self._sentence_rate_window_start = time.monotonic()
         self._keep_center_enabled = False
         self._keep_center_feed_id = ""
         self._keep_center_role = "vessel"
         self._keep_center_source_ids: List[str] = []
         self._log_dir = self._initialize_log_dir()
+        self._log_buffer: List[Tuple[str, str]] = []
+        self._log_flush_timer: Optional[QTimer] = None
+        if self._log_dir:
+            self._log_flush_timer = QTimer(self)
+            self._log_flush_timer.setInterval(2000)
+            self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+            self._log_flush_timer.start()
         self._startup_mode = self._settings.load_startup_mode()
 
         for feed in self._feeds.values():
@@ -140,6 +156,8 @@ class FeedController(QObject):
             return
 
         self._project_transition_active = False
+        # Reset position counter so canvas refresh fires for new layers
+        self._position_count = 0
         self._layer_manager.reset_project_layer_caches()
         self._last_position_by_layer.clear()
 
@@ -381,8 +399,10 @@ class FeedController(QObject):
                 self.start_feed(feed.feed_id)
 
     def stop_all(self, force: bool = False) -> None:
-        for feed_id in list(self._workers.keys()):
-            self.stop_feed(feed_id, force=force)
+        self._stop_all_workers_fast(force=force)
+        for feed_id in list(self._status_by_feed.keys()):
+            if self._status_by_feed.get(feed_id, {}).get("level") not in ("idle", None):
+                self._on_worker_status(feed_id, "idle", "Stopped")
 
     def _collect_track_entries(self, base_feed_ids: Optional[List[str]] = None) -> List[dict]:
         if base_feed_ids is None:
@@ -557,13 +577,14 @@ class FeedController(QObject):
                 changed = True
 
             if changed:
-                self._persist()
+                QTimer.singleShot(0, self._persist)
 
             self._on_worker_status(
                 base_feed_id,
                 "info",
                 f"{selected_role.capitalize()} track disabled (retained in memory)",
             )
+            self._emit_snapshot()
             return
 
         if not current_enabled:
@@ -574,32 +595,48 @@ class FeedController(QObject):
             changed = True
 
         if changed:
-            self._persist()
+            QTimer.singleShot(0, self._persist)
 
         self._on_worker_status(
             base_feed_id,
             "info",
             f"{selected_role.capitalize()} track enabled",
         )
+        self._emit_snapshot()
 
     def start_feed(self, feed_id: str) -> None:
         if self._shutting_down or self._project_transition_active:
+            diag(f"start_feed({feed_id}) BLOCKED: shutting_down={self._shutting_down}, transition={self._project_transition_active}")
+            QgsMessageLog.logMessage(
+                f"[UDP Nav] start_feed({feed_id}) blocked: shutting_down={self._shutting_down}, transition={self._project_transition_active}",
+                "UDP Nav",
+                Qgis.MessageLevel.Warning,
+            )
             return
 
         if feed_id in self._workers:
+            diag(f"start_feed({feed_id}) already running")
             return
 
         feed = self._feeds.get(feed_id)
         if feed is None:
+            diag(f"start_feed({feed_id}) feed not found in _feeds")
             return
 
+        diag(f"start_feed({feed_id}) -> '{feed.name}' on port {feed.port}")
+
+        QgsMessageLog.logMessage(
+            f"[UDP Nav] Starting feed '{feed.name}' on {feed.bind_host}:{feed.port}",
+            "UDP Nav",
+            Qgis.MessageLevel.Info,
+        )
+
         thread = QThread(self)
-        worker = UdpFeedWorker(feed, self._pipeline)
+        worker = UdpFeedWorker(feed)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.start)
         connection_type = _queued_connection_type()
-        worker.event_received.connect(self._on_worker_event, connection_type)
         worker.sentence_received.connect(self._on_worker_sentence, connection_type)
         worker.status.connect(self._on_worker_status, connection_type)
         worker.stopped.connect(self._on_worker_stopped, connection_type)
@@ -623,10 +660,7 @@ class FeedController(QObject):
 
         if thread is not None:
             thread.quit()
-            stopped = thread.wait(2500)
-            if force and not stopped:
-                thread.terminate()
-                thread.wait(1000)
+            thread.wait(3000)
             thread.deleteLater()
 
         self._on_worker_status(feed_id, "idle", "Stopped")
@@ -640,12 +674,22 @@ class FeedController(QObject):
         if not threads and not workers:
             return
 
+        # Request interruption on all threads first
         for thread in threads.values():
             thread.requestInterruption()
 
-        connection_type = _queued_connection_type()
-        for worker in workers.values():
-            QMetaObject.invokeMethod(worker, "stop", connection_type)
+        # During shutdown, invoke stop directly on each worker (bypasses queued
+        # connection which may never be delivered if the worker event loop is busy)
+        if self._shutting_down:
+            for worker in workers.values():
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+        else:
+            connection_type = _queued_connection_type()
+            for worker in workers.values():
+                QMetaObject.invokeMethod(worker, "stop", connection_type)
 
         for thread in threads.values():
             thread.quit()
@@ -653,8 +697,8 @@ class FeedController(QObject):
         deadline = time.monotonic() + (_SHUTDOWN_WORKER_WAIT_MS / 1000.0)
         for thread in threads.values():
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
-            stopped = thread.wait(remaining_ms)
-            if force and not stopped:
+            if not thread.wait(remaining_ms):
+                # Thread didn't stop in time — force terminate to prevent hang
                 thread.terminate()
                 thread.wait(500)
             thread.deleteLater()
@@ -724,7 +768,15 @@ class FeedController(QObject):
         self._shutting_down = True
         self._project_transition_active = False
         self._project_transition_resume_feed_ids = []
+        # Drain pending queued signals (sentence_received etc.) so they hit the
+        # _shutting_down guard and return immediately, rather than accumulating
+        # in the event queue and blocking shutdown.
+        from qgis.PyQt.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
         self._stop_all_workers_fast(force=True)
+        if self._log_flush_timer is not None:
+            self._log_flush_timer.stop()
+        self._flush_log_buffer()
         self._layer_manager.clear()
         self._latest_heading.clear()
         self._telemetry_by_layer.clear()
@@ -823,19 +875,34 @@ class FeedController(QObject):
         if not self._log_dir:
             return
 
-        date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
-        feed_part = self._safe_file_component(feed_id)
-        file_path = os.path.join(self._log_dir, f"{date_part}_{feed_part}.log")
-
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         category_text = str(category or "INFO").strip().upper() or "INFO"
         line = f"{stamp} [{category_text}] {message}\n"
 
-        try:
-            with open(file_path, "a", encoding="utf-8") as handle:
-                handle.write(line)
-        except OSError:
+        date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
+        feed_part = self._safe_file_component(feed_id)
+        file_path = os.path.join(self._log_dir, f"{date_part}_{feed_part}.log")
+
+        self._log_buffer.append((file_path, line))
+
+    def _flush_log_buffer(self) -> None:
+        if not self._log_buffer:
             return
+
+        buffer = self._log_buffer
+        self._log_buffer = []
+
+        # Group by file path to minimize open/close cycles
+        by_file: Dict[str, List[str]] = {}
+        for file_path, line in buffer:
+            by_file.setdefault(file_path, []).append(line)
+
+        for file_path, lines in by_file.items():
+            try:
+                with open(file_path, "a", encoding="utf-8") as handle:
+                    handle.writelines(lines)
+            except OSError:
+                pass
 
     def _emit_profiles(self) -> None:
         self.vessel_profiles_changed.emit(self.vessel_profiles())
@@ -908,6 +975,11 @@ class FeedController(QObject):
         if self._shutting_down:
             return
 
+        QgsMessageLog.logMessage(
+            f"[UDP Nav] Feed {feed_id}: [{level}] {message}",
+            "UDP Nav",
+            Qgis.MessageLevel.Info,
+        )
         self._set_status(feed_id, level, message)
 
     def _on_subfeed_status(self, feed: FeedConfig, role: str, level: str, message: str) -> None:
@@ -938,17 +1010,8 @@ class FeedController(QObject):
             "STATUS",
             f"{normalized_level}: {normalized_message}",
         )
-        self._emit_snapshot()
 
-    @pyqtSlot(object)
-    def _on_worker_event(self, event: object) -> None:
-        if self._shutting_down or self._project_transition_active:
-            return
-
-        feed = self._feeds.get(getattr(event, "feed_id", ""))
-        if feed is None:
-            return
-
+    def _dispatch_event(self, feed: "FeedConfig", event: object) -> None:
         if isinstance(event, ParseWarningEvent):
             role = self._route_role(feed, event.sentence_type, talker=event.talker)
             self._on_subfeed_status(
@@ -1007,15 +1070,55 @@ class FeedController(QObject):
             self._handle_position_event(event)
 
     @pyqtSlot(str, str, str)
+    @pyqtSlot(str, str, str)
     def _on_worker_sentence(self, feed_id: str, source_address: str, sentence: str) -> None:
         if self._shutting_down or self._project_transition_active:
             return
 
+        if not hasattr(self, "_sentence_diag_done"):
+            self._sentence_diag_done = True
+            diag(f"_on_worker_sentence: first sentence received for feed={feed_id}")
+
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
         source = source_address or "-"
         line = f"{stamp}Z [{source}] {sentence}"
-        self.sentence_streamed.emit(feed_id, line)
+        # Rate-limit sentence streaming to UI — skip if over threshold
+        self._sentence_counter += 1
+        now_mono = time.monotonic()
+        if (now_mono - self._sentence_rate_window_start) >= 1.0:
+            self._sentence_rate = self._sentence_counter
+            self._sentence_counter = 0
+            self._sentence_rate_window_start = now_mono
+        if self._sentence_rate <= _SENTENCE_STREAM_RATE_LIMIT:
+            self.sentence_streamed.emit(feed_id, line)
         self._append_log_line(feed_id, "SENTENCE", line)
+
+        # Parse on main thread (PyQt6 cannot deliver Python objects cross-thread)
+        feed = self._feeds.get(feed_id)
+        if feed is None:
+            return
+
+        events = self._pipeline.parse_lines(feed, [sentence], source_address=source_address)
+        for event in events:
+            self._event_count += 1
+            if self._event_count <= 5:
+                diag(f"Event #{self._event_count}: {type(event).__name__} "
+                     f"feed_id={getattr(event, 'feed_id', '?')}")
+                if isinstance(event, PositionFixEvent):
+                    diag(f"  lat={event.latitude} lon={event.longitude}")
+
+            try:
+                self._dispatch_event(feed, event)
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                diag(f"ERROR in event dispatch: {exc}")
+                QgsMessageLog.logMessage(
+                    f"[UDP Nav] Error handling event: {exc!r}\n{tb}",
+                    "UDP Nav",
+                    Qgis.MessageLevel.Critical,
+                )
+                self._set_status(feed_id, "error", f"Rendering error: {exc}")
 
     def _handle_position_event(self, event: PositionFixEvent) -> None:
         feed = self._feeds.get(event.feed_id)
@@ -1024,6 +1127,13 @@ class FeedController(QObject):
 
         role = self._route_role(feed, event.sentence_type, talker=event.talker)
         render_feed = self._render_feed(feed, role)
+
+        if not hasattr(self, "_pos_diag_done"):
+            self._pos_diag_done = True
+            diag(f"_handle_position_event: valid={event.valid} "
+                 f"lat={event.latitude} lon={event.longitude} "
+                 f"role={role} render_feed={render_feed.feed_id} "
+                 f"sentence_type={event.sentence_type}")
 
         def _finish() -> None:
             self._apply_keep_center_for_feed(feed, event.received_at)
@@ -1068,6 +1178,12 @@ class FeedController(QObject):
                 if isinstance(depth_value, (int, float)):
                     track_depth_m = float(depth_value)
 
+            self._position_count += 1
+            if self._position_count <= 3:
+                print(f"[UDP Nav] Rendering position #{self._position_count}: "
+                      f"lat={event.latitude:.6f} lon={event.longitude:.6f} "
+                      f"feed={render_feed.feed_id} mode={render_feed.symbol_mode}")
+
             self._layer_manager.upsert_position(
                 render_feed,
                 event,
@@ -1075,6 +1191,22 @@ class FeedController(QObject):
                 track_use_depth_3d=track_use_depth_3d,
                 track_depth_m=track_depth_m,
             )
+
+            # Force full canvas refresh — triggerRepaint alone doesn't work in QGIS 4
+            # for newly created memory layers
+            if self._position_count <= 5:
+                try:
+                    self._iface.mapCanvas().refresh()
+                    if self._position_count <= 2:
+                        from ..diag import diag
+                        diag(f"  canvas.refresh() called (position #{self._position_count})")
+                except Exception as e:
+                    from ..diag import diag
+                    diag(f"  canvas.refresh() FAILED: {e}")
+            # Deferred repaint as safety net: QGIS cache might not be invalidated
+            # on the same event-loop tick the layer was created
+            if self._position_count == 1:
+                QTimer.singleShot(200, self._deferred_canvas_refresh)
             self._remember_position(
                 render_feed.feed_id,
                 event.latitude,
@@ -1975,6 +2107,24 @@ class FeedController(QObject):
         if code in {"NRY", "PRE"}:
             return "info"
         return "warning"
+
+    def _deferred_canvas_refresh(self) -> None:
+        """Safety-net repaint 200ms after first position post-transition.
+
+        QGIS map canvas caching may not invalidate properly on the same
+        event-loop tick a layer is created. This deferred refresh ensures
+        the new polygon/marker becomes visible even if the initial
+        refresh() was a no-op due to stale cache state.
+        """
+        try:
+            canvas = self._iface.mapCanvas()
+            # Clear all layer caches then repaint
+            for layer_id, layer in QgsProject.instance().mapLayers().items():
+                if hasattr(layer, "triggerRepaint"):
+                    layer.triggerRepaint()
+            canvas.refresh()
+        except Exception:
+            pass
 
     def _remember_position(
         self,

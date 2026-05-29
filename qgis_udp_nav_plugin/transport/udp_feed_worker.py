@@ -8,7 +8,6 @@ from qgis.PyQt.QtNetwork import QHostAddress, QUdpSocket
 
 from ..model.feed_config import FeedConfig
 from ..parser.core import split_datagram
-from ..parser.pipeline import SentencePipeline
 
 
 def _fallback_any_ipv4_address() -> QHostAddress:
@@ -40,15 +39,20 @@ def _bind_flags():
 
 
 class UdpFeedWorker(QObject):
-    event_received = pyqtSignal(object)
-    sentence_received = pyqtSignal(str, str, str)
-    status = pyqtSignal(str, str, str)
-    stopped = pyqtSignal(str)
+    """Receives UDP datagrams and emits raw sentences as strings.
 
-    def __init__(self, feed_config: FeedConfig, pipeline: SentencePipeline) -> None:
+    Parsing is intentionally NOT done here — PyQt6/Qt6 cannot reliably
+    deliver custom Python objects across thread boundaries via signals.
+    The controller parses sentences on the main thread instead.
+    """
+
+    sentence_received = pyqtSignal(str, str, str)  # feed_id, source_address, line
+    status = pyqtSignal(str, str, str)  # feed_id, level, message
+    stopped = pyqtSignal(str)  # feed_id
+
+    def __init__(self, feed_config: FeedConfig) -> None:
         super().__init__()
         self._config = feed_config
-        self._pipeline = pipeline
         self._socket: Optional[QUdpSocket] = None
         self._stale_timer: Optional[QTimer] = None
         self._last_datagram_ts = 0.0
@@ -146,14 +150,6 @@ class UdpFeedWorker(QObject):
             for line in lines:
                 self.sentence_received.emit(self._config.feed_id, source_address, line)
 
-            events = self._pipeline.parse_lines(
-                self._config,
-                lines,
-                source_address=source_address,
-            )
-            for event in events:
-                self.event_received.emit(event)
-
             processed += 1
             if processed >= self._MAX_DATAGRAMS_PER_CYCLE:
                 break
@@ -163,14 +159,12 @@ class UdpFeedWorker(QObject):
             and self._socket.hasPendingDatagrams()
             and not self._should_abort_processing()
         ):
-            # Yield to the event loop so stop/quit requests are not starved.
             QTimer.singleShot(0, self._on_ready_read)
 
     def _read_datagram(self) -> Tuple[Optional[bytes], str]:
         if self._socket is None:
             return None, ""
 
-        # Qt6 has receiveDatagram; this fallback keeps it working on older runtimes.
         if hasattr(self._socket, "receiveDatagram"):
             datagram = self._socket.receiveDatagram()
             sender = datagram.senderAddress().toString()

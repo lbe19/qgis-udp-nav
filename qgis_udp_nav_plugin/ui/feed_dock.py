@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Set
 
-from qgis.PyQt.QtCore import QEvent, QPointF, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QPointF, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QBrush, QPainter, QPalette, QPen, QPolygonF
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -1134,6 +1134,8 @@ class FeedDockWidget(QDockWidget):
         self._rows_by_feed: Dict[str, dict] = {}
         self._sentence_logs: Dict[str, list[str]] = {}
         self._sentence_snapshots: Dict[str, Dict[str, str]] = {}
+        self._sentence_batch: list[tuple[str, str]] = []
+        self._sentence_batch_timer: Optional[QTimer] = None
         self._active_debug_feed_id: Optional[str] = None
         self._vessel_profiles: Dict[str, dict] = {}
         self._keep_center_enabled = False
@@ -1174,9 +1176,9 @@ class FeedDockWidget(QDockWidget):
         self._keep_vehicle_center_button.setCheckable(True)
         self._keep_group_center_button = QPushButton("Keep Group Center")
         self._keep_group_center_button.setCheckable(True)
-        self._track_vessel_button = QPushButton("Track Vessel")
+        self._track_vessel_button = QPushButton("Vessel Track")
         self._track_vessel_button.setCheckable(True)
-        self._track_vehicle_button = QPushButton("Track Vehicle")
+        self._track_vehicle_button = QPushButton("Vehicle Track")
         self._track_vehicle_button.setCheckable(True)
         self._group_options_button = QPushButton("Group Sources")
         self._save_tracks_button = QPushButton("Save Tracks")
@@ -1578,7 +1580,35 @@ class FeedDockWidget(QDockWidget):
 
         self._update_sentence_snapshot(feed_id, line)
 
-        if self._selected_log_feed_id() != feed_id:
+        # Batch widget updates: accumulate and flush every 100ms
+        self._sentence_batch.append((feed_id, line))
+        if self._sentence_batch_timer is None:
+            self._sentence_batch_timer = QTimer(self)
+            self._sentence_batch_timer.setSingleShot(True)
+            self._sentence_batch_timer.setInterval(100)
+            self._sentence_batch_timer.timeout.connect(self._flush_sentence_batch)
+        if not self._sentence_batch_timer.isActive():
+            self._sentence_batch_timer.start()
+
+    def _flush_sentence_batch(self) -> None:
+        """Flush accumulated sentences to the debug panel in one paint cycle."""
+        if not self._sentence_batch:
+            return
+
+        batch = self._sentence_batch
+        self._sentence_batch = []
+
+        # Only update widget if dock is visible
+        if not self.isVisible():
+            return
+
+        selected_feed = self._selected_log_feed_id()
+        if not selected_feed:
+            return
+
+        # Filter to only sentences for the currently selected feed
+        relevant = [line for feed_id, line in batch if feed_id == selected_feed]
+        if not relevant:
             return
 
         scrollbar = self._debug_output.verticalScrollBar()
@@ -1586,9 +1616,10 @@ class FeedDockWidget(QDockWidget):
         previous_value = scrollbar.value()
 
         if self._no_scroll_button.isChecked():
-            self._debug_output.setPlainText(self._snapshot_text_for_feed(feed_id))
+            self._debug_output.setPlainText(self._snapshot_text_for_feed(selected_feed))
         else:
-            self._debug_output.appendPlainText(line)
+            # Append all lines at once to minimize repaints
+            self._debug_output.appendPlainText("\n".join(relevant))
 
         if follow_tail:
             scrollbar.setValue(scrollbar.maximum())
@@ -2179,10 +2210,10 @@ class FeedDockWidget(QDockWidget):
         self._set_track_mode_button_checked("vessel", vessel_track_enabled)
         self._set_track_mode_button_checked("vehicle", vehicle_track_enabled)
         self._track_vessel_button.setText(
-            "Track Vessel: On" if vessel_track_enabled else "Track Vessel"
+            "Vessel Track: On" if vessel_track_enabled else "Vessel Track"
         )
         self._track_vehicle_button.setText(
-            "Track Vehicle: On" if vehicle_track_enabled else "Track Vehicle"
+            "Vehicle Track: On" if vehicle_track_enabled else "Vehicle Track"
         )
 
         vessel_active = (

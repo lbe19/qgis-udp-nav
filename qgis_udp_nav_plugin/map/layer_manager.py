@@ -7,6 +7,7 @@ import math
 import os
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -17,6 +18,7 @@ from qgis.core import (
     QgsFillSymbol,
     QgsField,
     QgsGeometry,
+    QgsLayerTreeLayer,
     QgsLineSymbol,
     QgsMarkerSymbol,
     QgsPointXY,
@@ -31,9 +33,10 @@ from qgis.core import (
 
 from ..model.feed_config import FeedConfig
 from ..model.events import PositionFixEvent
+from ..diag import diag
 
 _OVERVIEW_ARROW_SCALE_THRESHOLD = 8189.0
-_OVERVIEW_ARROW_SIZE_MM = 6.0
+_OVERVIEW_ARROW_SIZE_MM = 4.0
 _ICON_STYLIZE_SCALE_THRESHOLD = 8189.0
 _ICON_STYLIZE_SIZE_FACTOR = 2.8
 _ICON_STYLIZE_MIN_DELTA = 1.8
@@ -61,24 +64,29 @@ class LayerManager:
         self._layers: Dict[str, QgsVectorLayer] = {}
         self._overview_layers: Dict[str, QgsVectorLayer] = {}
         self._track_layers: Dict[str, QgsVectorLayer] = {}
-        self._track_points: Dict[str, List[Tuple[float, float, float]]] = {}
+        self._track_points: Dict[str, deque] = {}
         self._track_lengths: Dict[str, Tuple[float, float]] = {}
         self._track_dimensions: Dict[str, str] = {}
         self._track_last_depth: Dict[str, float] = {}
         # Incremental track length state (Phase 1)
         self._track_origin: Dict[str, Tuple[float, float]] = {}
-        self._track_local_xy: Dict[str, List[Tuple[float, float, float]]] = {}
+        self._track_local_xy: Dict[str, deque] = {}
         self._track_raw_length: Dict[str, float] = {}
         # Geometry rebuild throttle state (Phase 2)
         self._track_geometry_dirty: Dict[str, int] = {}
         # Speed gate: last accepted fix per feed (lat, lon, monotonic_ts)
         self._track_last_accepted: Dict[str, Tuple[float, float, float]] = {}
-        # Live position feature ID cache (Phase 5)
+        # Live position feature ID cache
         self._live_feature_id: Dict[str, int] = {}
+        # Track feature ID cache (avoid delete+recreate on every rebuild)
+        self._track_feature_id: Dict[str, int] = {}
+        # Overview marker feature ID cache (avoid delete+recreate on every update)
+        self._overview_feature_id: Dict[str, int] = {}
         self._heading_by_feed: Dict[str, float] = {}
         self._position_by_feed: Dict[str, Tuple[float, float]] = {}
         self._saved_tracks_layer: Optional[QgsVectorLayer] = None
         self._saved_tracks_file_path: str = ""
+        self._upsert_count = 0
         self._prune_svg_cache()
 
     @staticmethod
@@ -152,6 +160,10 @@ class LayerManager:
         self._overview_layers.clear()
         self._track_layers.clear()
         self._saved_tracks_layer = None
+        self._live_feature_id.clear()
+        self._track_feature_id.clear()
+        self._overview_feature_id.clear()
+        self._upsert_count = 0
 
     def prune_dead_layer_caches(self) -> None:
         for cache_key in list(self._layers.keys()):
@@ -174,6 +186,11 @@ class LayerManager:
         track_use_depth_3d: bool = False,
         track_depth_m: Optional[float] = None,
     ) -> None:
+        self._upsert_count += 1
+        if self._upsert_count <= 3:
+            diag(f"LayerManager.upsert_position #{self._upsert_count}: "
+                 f"feed={feed.feed_id} lat={event.latitude} lon={event.longitude}")
+
         if event.latitude is None or event.longitude is None:
             return
 
@@ -230,15 +247,33 @@ class LayerManager:
 
         cached_fid = self._live_feature_id.get(feed.feed_id)
         if cached_fid is not None:
-            attr_map = {cached_fid: {i: v for i, v in enumerate(attributes)}}
-            provider.changeGeometryValues({cached_fid: geometry})
-            provider.changeAttributeValues(attr_map)
-        else:
+            geom_ok = provider.changeGeometryValues({cached_fid: geometry})
+            if geom_ok:
+                attr_map = {cached_fid: {i: v for i, v in enumerate(attributes)}}
+                provider.changeAttributeValues(attr_map)
+            else:
+                # Feature was externally deleted — invalidate cache and recreate
+                del self._live_feature_id[feed.feed_id]
+                cached_fid = None
+
+        if cached_fid is None:
             feature = QgsFeature(layer.fields())
             feature.setGeometry(geometry)
             feature.setAttributes(attributes)
-            provider.addFeature(feature)
+            ok = provider.addFeature(feature)
             self._live_feature_id[feed.feed_id] = feature.id()
+            if self._upsert_count <= 2:
+                renderer = layer.renderer()
+                sym = renderer.symbol() if renderer else None
+                sym_color = sym.color().name() if sym else "NO_SYMBOL"
+                in_project = QgsProject.instance().mapLayer(layer.id()) is not None
+                diag(f"  addFeature ok={ok} fid={feature.id()} "
+                     f"geom_wkt={geometry.asWkt()[:200]} "
+                     f"layer_valid={layer.isValid()} "
+                     f"featureCount={provider.featureCount()} "
+                     f"in_project={in_project} "
+                     f"sym_color={sym_color} "
+                     f"layer_name={layer.name()}")
 
         if feed.symbol_mode in {"vessel", "vehicle"}:
             overview_heading = self._heading_by_feed.get(feed.feed_id, 0.0)
@@ -252,6 +287,7 @@ class LayerManager:
             self._remove_overview_layer(feed.feed_id)
 
         if heading_value is not None and feed.symbol_mode not in {"vessel", "vehicle"}:
+            # For vessel/vehicle, heading is already baked into the polygon geometry above
             self.update_heading(feed, heading_value)
 
         self._upsert_track(
@@ -338,6 +374,7 @@ class LayerManager:
         self._track_raw_length.pop(feed_id, None)
         self._track_geometry_dirty.pop(feed_id, None)
         self._track_last_accepted.pop(feed_id, None)
+        self._track_feature_id.pop(feed_id, None)
 
         self._remove_layer_from_project(layer)
 
@@ -669,6 +706,7 @@ class LayerManager:
         self._track_raw_length.pop(feed_id, None)
         self._track_geometry_dirty.pop(feed_id, None)
         self._track_last_accepted.pop(feed_id, None)
+        self._track_feature_id.pop(feed_id, None)
 
         self._remove_project_layers_for_feed(
             feed_id,
@@ -686,6 +724,7 @@ class LayerManager:
             return
 
         if feed.symbol_mode in {"vessel", "vehicle"}:
+            # Rebuild polygon geometry at new heading
             self._refresh_vessel_geometry(feed)
             self._update_overview_heading(feed.feed_id, normalized)
             layer.triggerRepaint()
@@ -715,6 +754,8 @@ class LayerManager:
         self._track_raw_length.clear()
         self._track_geometry_dirty.clear()
         self._track_last_accepted.clear()
+        self._track_feature_id.clear()
+        self._overview_feature_id.clear()
         self._live_feature_id.clear()
         self._heading_by_feed.clear()
         self._position_by_feed.clear()
@@ -825,8 +866,10 @@ class LayerManager:
                 if is_polygon == wants_polygon:
                     return layer
 
+                # Geometry type mismatch — remove and recreate
                 self._remove_layer_from_project(layer)
                 self._layers.pop(feed.feed_id, None)
+                layer = None
 
         if layer is None:
             layer = self._adopt_existing_project_layer(
@@ -852,6 +895,9 @@ class LayerManager:
                     self._layers[feed.feed_id] = layer
                     return layer
 
+        # Clean up any orphaned layers from previous transitions
+        self._remove_project_layers_for_feed(feed.feed_id, _LAYER_KIND_LIVE, expected_name)
+
         layer_uri = "Polygon?crs=EPSG:4326" if wants_polygon else "Point?crs=EPSG:4326"
         layer = QgsVectorLayer(layer_uri, expected_name, "memory")
         provider = layer.dataProvider()
@@ -873,20 +919,37 @@ class LayerManager:
         layer.renderer().setSymbol(self._create_symbol(feed))
         self._mark_ephemeral_layer(layer)
         self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_LIVE)
-        QgsProject.instance().addMapLayer(layer)
+        # Add to project WITHOUT auto-legend so we control tree position
+        QgsProject.instance().addMapLayer(layer, False)
+        # Manually insert at tree root position 0 → renders ON TOP of all other layers
+        root = QgsProject.instance().layerTreeRoot()
+        root.insertChildNode(0, QgsLayerTreeLayer(layer))
+        # Handle custom rendering order if enabled
+        if root.hasCustomLayerOrder():
+            order = root.customLayerOrder()
+            if layer not in order:
+                order.insert(0, layer)
+                root.setCustomLayerOrder(order)
+        # Invalidate stale feature ID cache — critical for QGIS 4 where
+        # changeGeometryValues silently "succeeds" on non-existent FIDs
+        self._live_feature_id.pop(feed.feed_id, None)
+        tree_node = root.findLayer(layer.id())
+        diag(f"_ensure_layer: CREATED NEW layer '{expected_name}' id={layer.id()} "
+             f"type={'Polygon' if wants_polygon else 'Point'} "
+             f"tree_visible={tree_node.isVisible() if tree_node else 'NO_NODE'}")
         self._layers[feed.feed_id] = layer
         return layer
 
     def _create_symbol(self, feed: FeedConfig):
         if feed.symbol_mode in {"vessel", "vehicle"}:
-            return QgsFillSymbol.createSimple(
-                {
-                    "color": feed.color_hex,
-                    "outline_color": "#1f1f1f",
-                    "outline_width": "0.4",
-                    "outline_style": "solid",
-                }
-            )
+            # Polygon fill symbol for geographic-scale vessel outline
+            symbol = QgsFillSymbol.createSimple({
+                "color": feed.color_hex,
+                "outline_color": "#1f1f1f",
+                "outline_width": "0.5",
+                "outline_style": "solid",
+            })
+            return symbol
 
         marker_name = feed.qgis_symbol_name or "circle"
         qgis_width = max(0.1, float(feed.qgis_symbol_width))
@@ -958,6 +1021,9 @@ class LayerManager:
             self._overview_layers[feed.feed_id] = layer
             return layer
 
+        # Clean up any orphaned layers from previous transitions
+        self._remove_project_layers_for_feed(feed.feed_id, _LAYER_KIND_OVERVIEW, expected_name)
+
         layer = QgsVectorLayer(
             "Point?crs=EPSG:4326",
             expected_name,
@@ -976,7 +1042,17 @@ class LayerManager:
         layer.renderer().setSymbol(self._create_overview_symbol(feed))
         self._mark_ephemeral_layer(layer)
         self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_OVERVIEW)
+        # Add to project WITHOUT auto-legend so we control tree position
         QgsProject.instance().addMapLayer(layer, False)
+        # Manually insert at tree root position 0 → renders ON TOP of all other layers
+        root = QgsProject.instance().layerTreeRoot()
+        root.insertChildNode(0, QgsLayerTreeLayer(layer))
+        # Handle custom rendering order if enabled
+        if root.hasCustomLayerOrder():
+            order = root.customLayerOrder()
+            if layer not in order:
+                order.insert(0, layer)
+                root.setCustomLayerOrder(order)
         self._overview_layers[feed.feed_id] = layer
         return layer
 
@@ -1018,7 +1094,17 @@ class LayerManager:
         layer.renderer().setSymbol(self._create_track_symbol(feed.color_hex))
         self._mark_ephemeral_layer(layer)
         self._tag_layer(layer, feed_id=feed.feed_id, layer_kind=_LAYER_KIND_TRACK)
-        QgsProject.instance().addMapLayer(layer)
+        # Add to project WITHOUT auto-legend so we control tree position
+        QgsProject.instance().addMapLayer(layer, False)
+        # Track layers go BELOW live/overview layers — insert at end
+        root = QgsProject.instance().layerTreeRoot()
+        root.addChildNode(QgsLayerTreeLayer(layer))
+        # Handle custom rendering order if enabled
+        if root.hasCustomLayerOrder():
+            order = root.customLayerOrder()
+            if layer not in order:
+                order.append(layer)
+                root.setCustomLayerOrder(order)
         self._track_layers[feed.feed_id] = layer
         return layer
 
@@ -1112,12 +1198,17 @@ class LayerManager:
         if not self._passes_speed_gate(feed, latitude, longitude):
             return
 
-        points = self._track_points.setdefault(feed_id, [])
-        points.append((float(latitude), float(longitude), depth_m))
+        points = self._track_points.get(feed_id)
+        if points is None:
+            points = deque(maxlen=_TRACK_MAX_POINTS)
+            self._track_points[feed_id] = points
 
-        # --- Incremental local-XY and raw length (Phase 1) ---
+        # --- Incremental local-XY and raw length ---
         origin = self._track_origin.get(feed_id)
-        local_xy = self._track_local_xy.setdefault(feed_id, [])
+        local_xy = self._track_local_xy.get(feed_id)
+        if local_xy is None:
+            local_xy = deque(maxlen=_TRACK_MAX_POINTS)
+            self._track_local_xy[feed_id] = local_xy
 
         if origin is None:
             origin = (float(latitude), float(longitude))
@@ -1127,10 +1218,23 @@ class LayerManager:
 
         z_m = float(depth_m) if track_use_depth_3d else 0.0
         x_m, y_m = self._latlon_to_local_xy(origin[0], origin[1], latitude, longitude)
+
+        # Subtract trimmed segment from raw length BEFORE append (deque auto-trims)
+        raw_length = self._track_raw_length.get(feed_id, 0.0)
+        if len(local_xy) == _TRACK_MAX_POINTS and len(local_xy) >= 2:
+            p0 = local_xy[0]
+            p1 = local_xy[1]
+            dx = p1[0] - p0[0]
+            dy = p1[1] - p0[1]
+            dz = (p1[2] - p0[2]) if track_use_depth_3d else 0.0
+            raw_length -= math.sqrt(dx * dx + dy * dy + dz * dz)
+            raw_length = max(0.0, raw_length)
+
+        # Append new point (deque maxlen handles FIFO trim)
+        points.append((float(latitude), float(longitude), depth_m))
         local_xy.append((x_m, y_m, z_m))
 
         # Add new segment length to running total
-        raw_length = self._track_raw_length.get(feed_id, 0.0)
         if len(local_xy) >= 2:
             prev = local_xy[-2]
             dx = x_m - prev[0]
@@ -1138,37 +1242,33 @@ class LayerManager:
             dz = (z_m - prev[2]) if track_use_depth_3d else 0.0
             raw_length += math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        # FIFO trim - subtract removed segment from raw length
-        if len(points) > _TRACK_MAX_POINTS:
-            trim_count = len(points) - _TRACK_MAX_POINTS
-            for i in range(trim_count):
-                if len(local_xy) > 1:
-                    p0 = local_xy[0]
-                    p1 = local_xy[1]
-                    dx = p1[0] - p0[0]
-                    dy = p1[1] - p0[1]
-                    dz = (p1[2] - p0[2]) if track_use_depth_3d else 0.0
-                    raw_length -= math.sqrt(dx * dx + dy * dy + dz * dz)
-                    raw_length = max(0.0, raw_length)
-                del local_xy[0]
-            del points[:trim_count]
-
         self._track_raw_length[feed_id] = raw_length
         self._track_last_accepted[feed_id] = (float(latitude), float(longitude), time.monotonic())
 
-        # Smoothed length from cached local XY
-        smoothed_length_m = self._compute_smoothed_length(local_xy, track_use_depth_3d)
-
-        self._track_lengths[feed_id] = (raw_length, smoothed_length_m)
         self._track_dimensions[feed_id] = "3d" if track_use_depth_3d else "2d"
 
-        # --- Geometry rebuild throttle (Phase 2) ---
+        # --- Geometry rebuild throttle ---
         dirty = self._track_geometry_dirty.get(feed_id, 0) + 1
         self._track_geometry_dirty[feed_id] = dirty
 
-        if dirty < _TRACK_GEOMETRY_REBUILD_INTERVAL and len(points) >= 10:
+        # Adaptive rebuild interval: less frequent rebuilds for longer tracks
+        # to avoid O(n) smoothing/geometry cost at 8000 points every 5 updates
+        point_count = len(points)
+        if point_count > 2000:
+            rebuild_interval = 30
+        elif point_count > 500:
+            rebuild_interval = 15
+        else:
+            rebuild_interval = _TRACK_GEOMETRY_REBUILD_INTERVAL
+
+        if dirty < rebuild_interval and point_count >= 10:
+            # Update raw length only; defer smoothed + geometry
+            self._track_lengths[feed_id] = (raw_length, self._track_lengths.get(feed_id, (0.0, 0.0))[1])
             return
 
+        # Full rebuild: compute smoothed length and update geometry
+        smoothed_length_m = self._compute_smoothed_length(list(local_xy), track_use_depth_3d)
+        self._track_lengths[feed_id] = (raw_length, smoothed_length_m)
         self._track_geometry_dirty[feed_id] = 0
         self._rebuild_track_geometry(feed, points, raw_length, smoothed_length_m)
 
@@ -1210,31 +1310,52 @@ class LayerManager:
     def _rebuild_track_geometry(
         self,
         feed: FeedConfig,
-        points: "List[Tuple[float, float, float]]",
+        points,
         raw_length_m: float,
         smoothed_length_m: float,
     ) -> None:
         layer = self._ensure_track_layer(feed)
         provider = layer.dataProvider()
-        existing_ids = [feature.id() for feature in layer.getFeatures()]
-        if existing_ids:
-            provider.deleteFeatures(existing_ids)
+        feed_id = feed.feed_id
+
+        attributes = [
+            feed_id,
+            feed.name,
+            float(raw_length_m),
+            float(smoothed_length_m),
+            self._track_dimensions.get(feed_id, "2d"),
+            len(points),
+        ]
 
         if len(points) >= 2:
-            feature = QgsFeature(layer.fields())
             line = [QgsPointXY(lon, lat) for lat, lon, _depth in points]
-            feature.setGeometry(QgsGeometry.fromPolylineXY(line))
-            feature.setAttributes(
-                [
-                    feed.feed_id,
-                    feed.name,
-                    float(raw_length_m),
-                    float(smoothed_length_m),
-                    self._track_dimensions.get(feed.feed_id, "2d"),
-                    len(points),
-                ]
-            )
+            geometry = QgsGeometry.fromPolylineXY(line)
+        else:
+            geometry = QgsGeometry()
+
+        cached_fid = self._track_feature_id.get(feed_id)
+        if cached_fid is not None:
+            if len(points) >= 2:
+                geom_ok = provider.changeGeometryValues({cached_fid: geometry})
+                if geom_ok:
+                    attr_map = {cached_fid: {i: v for i, v in enumerate(attributes)}}
+                    provider.changeAttributeValues(attr_map)
+                else:
+                    # Feature gone — invalidate and recreate
+                    del self._track_feature_id[feed_id]
+                    cached_fid = None
+            else:
+                # Too few points — remove the feature
+                provider.deleteFeatures([cached_fid])
+                del self._track_feature_id[feed_id]
+                cached_fid = None
+
+        if cached_fid is None and len(points) >= 2:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(geometry)
+            feature.setAttributes(attributes)
             provider.addFeature(feature)
+            self._track_feature_id[feed_id] = feature.id()
 
         layer.updateExtents()
         layer.triggerRepaint()
@@ -1323,7 +1444,8 @@ class LayerManager:
         points: List[Tuple[float, float, float]],
         window_size: int,
     ) -> List[Tuple[float, float, float]]:
-        if len(points) <= 2:
+        n = len(points)
+        if n <= 2:
             return list(points)
 
         size = max(1, int(window_size))
@@ -1331,17 +1453,27 @@ class LayerManager:
             return list(points)
 
         half_window = size // 2
-        smoothed: List[Tuple[float, float, float]] = []
-        for index in range(len(points)):
-            start = max(0, index - half_window)
-            end = min(len(points), index + half_window + 1)
-            subset = points[start:end]
-            count = float(len(subset))
 
-            avg_x = sum(point[0] for point in subset) / count
-            avg_y = sum(point[1] for point in subset) / count
-            avg_z = sum(point[2] for point in subset) / count
-            smoothed.append((avg_x, avg_y, avg_z))
+        # Prefix-sum approach: O(n) total with O(1) per-point window average.
+        # Avoids per-iteration list slicing that dominated the old O(n*w) algorithm.
+        prefix_x = [0.0] * (n + 1)
+        prefix_y = [0.0] * (n + 1)
+        prefix_z = [0.0] * (n + 1)
+        for i in range(n):
+            prefix_x[i + 1] = prefix_x[i] + points[i][0]
+            prefix_y[i + 1] = prefix_y[i] + points[i][1]
+            prefix_z[i + 1] = prefix_z[i] + points[i][2]
+
+        smoothed: List[Tuple[float, float, float]] = [None] * n  # type: ignore[list-item]
+        for index in range(n):
+            start = max(0, index - half_window)
+            end = min(n, index + half_window + 1)
+            count = float(end - start)
+            smoothed[index] = (
+                (prefix_x[end] - prefix_x[start]) / count,
+                (prefix_y[end] - prefix_y[start]) / count,
+                (prefix_z[end] - prefix_z[start]) / count,
+            )
 
         return smoothed
 
@@ -1354,19 +1486,40 @@ class LayerManager:
     ) -> None:
         layer = self._ensure_overview_layer(feed)
         provider = layer.dataProvider()
+        feed_id = feed.feed_id
 
-        existing_ids = [feature.id() for feature in layer.getFeatures()]
-        if existing_ids:
-            provider.deleteFeatures(existing_ids)
+        geometry = QgsGeometry.fromPointXY(QgsPointXY(longitude, latitude))
+        attributes = [feed_id, feed.name, float(heading_deg)]
 
-        feature = QgsFeature(layer.fields())
-        feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(longitude, latitude)))
-        feature.setAttributes([feed.feed_id, feed.name, float(heading_deg)])
-        provider.addFeature(feature)
+        cached_fid = self._overview_feature_id.get(feed_id)
+        if cached_fid is not None:
+            geom_ok = provider.changeGeometryValues({cached_fid: geometry})
+            if geom_ok:
+                attr_map = {cached_fid: {i: v for i, v in enumerate(attributes)}}
+                provider.changeAttributeValues(attr_map)
+            else:
+                # Feature gone — invalidate and recreate below
+                del self._overview_feature_id[feed_id]
+                cached_fid = None
 
-        self._update_overview_heading(feed.feed_id, heading_deg)
+        if cached_fid is None:
+            # Remove any stale features (shouldn't exist, but safety net)
+            existing_ids = [f.id() for f in layer.getFeatures()]
+            if existing_ids:
+                provider.deleteFeatures(existing_ids)
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(geometry)
+            feature.setAttributes(attributes)
+            provider.addFeature(feature)
+            self._overview_feature_id[feed_id] = feature.id()
+
+        self._update_overview_heading(feed_id, heading_deg)
         layer.updateExtents()
         layer.triggerRepaint()
+        if self._upsert_count <= 2:
+            diag(f"  overview marker added: layer={layer.name()} "
+                 f"featureCount={provider.featureCount()} "
+                 f"in_project={QgsProject.instance().mapLayer(layer.id()) is not None}")
 
     def _update_overview_style(self, feed: FeedConfig) -> None:
         layer = self._ensure_overview_layer(feed)
@@ -1383,11 +1536,13 @@ class LayerManager:
         self._apply_heading_to_layer(layer, heading_deg)
 
     def _create_overview_symbol(self, feed: FeedConfig) -> QgsMarkerSymbol:
+        # Simple arrow marker as always-visible backstop (proven to render in QGIS 4)
+        marker_size = 5.0
         symbol = QgsMarkerSymbol.createSimple(
             {
                 "name": "arrow",
                 "color": feed.color_hex,
-                "size": f"{_OVERVIEW_ARROW_SIZE_MM:.2f}",
+                "size": f"{marker_size:.2f}",
                 "outline_color": "#1f1f1f",
                 "outline_width": "0.2",
             }
@@ -1415,11 +1570,13 @@ class LayerManager:
             size_property = self._symbol_property("PropertySize")
             set_property = getattr(symbol_layer, "setDataDefinedProperty", None)
             if size_property is not None and callable(set_property):
+                # Always visible — smaller close, larger far
                 expression = (
                     "CASE "
-                    f"WHEN @map_scale > {_OVERVIEW_ARROW_SCALE_THRESHOLD:.0f} "
-                    f"THEN {_OVERVIEW_ARROW_SIZE_MM:.2f} "
-                    "ELSE 0 "
+                    "WHEN @map_scale < 3000 THEN 3.0 "
+                    "WHEN @map_scale < 8000 THEN 4.0 "
+                    "WHEN @map_scale < 20000 THEN 5.0 "
+                    "ELSE 7.0 "
                     "END"
                 )
                 set_property(size_property, QgsProperty.fromExpression(expression))
@@ -1449,6 +1606,18 @@ class LayerManager:
                 symbol.setAngle(float(heading_deg))
             except (TypeError, ValueError):
                 return
+
+    @staticmethod
+    def _hex_to_rgba_str(hex_color: str) -> str:
+        """Convert '#rrggbb' or '#rrggbbaa' to 'r,g,b,a' format for QGIS symbols."""
+        h = hex_color.lstrip("#")
+        if len(h) == 6:
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"{r},{g},{b},255"
+        elif len(h) == 8:
+            r, g, b, a = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), int(h[6:8], 16)
+            return f"{r},{g},{b},{a}"
+        return "255,69,0,255"  # fallback orange
 
     @staticmethod
     def _normalize_heading(value: float) -> float:

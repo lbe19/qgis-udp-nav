@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 160">
+  <!-- Vehicle/ROV rectangular shape pointing UP (north/0°) -->
+  <rect x="15" y="15" width="70" height="130" rx="8" ry="8"
+        fill="param(fill) #ff4500"
+        stroke="param(outline) #1f1f1f"
+        stroke-width="3"/>
+  <!-- Direction indicator (arrow at top) -->
+  <polygon points="50,5 60,25 40,25"
+           fill="param(outline) #1f1f1f"/>
+</svg>

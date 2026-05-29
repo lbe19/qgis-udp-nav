@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QApplication
-from qgis.core import QgsProject
+from qgis.core import Qgis, QgsMessageLog, QgsProject
 
 from .controller import FeedController
+from .diag import DIAG_LOG_PATH, diag
 from .ui import FeedDockWidget
 
 
@@ -36,6 +40,14 @@ class QgisUdpNavPlugin:
         self._project_transition_watchdog_token = 0
 
     def initGui(self) -> None:
+        # Clear diagnostic log on startup
+        try:
+            with open(DIAG_LOG_PATH, "w", encoding="utf-8") as f:
+                f.write(f"=== UDP Nav Plugin Startup {datetime.now(timezone.utc).isoformat()} ===\n")
+        except Exception:
+            pass
+        diag("initGui called")
+
         self._action = QAction(QIcon(_plugin_icon_path()), "QGIS UDP Nav", self.iface.mainWindow())
         self._action.setObjectName("qgis_udp_nav_action")
         self._action.setToolTip("Open QGIS UDP Nav")
@@ -44,15 +56,16 @@ class QgisUdpNavPlugin:
         self.iface.addPluginToMenu("&QGIS UDP Nav", self._action)
         self.iface.addToolBarIcon(self._action)
         self._connect_ui_lifecycle_signals()
-        self._schedule_action_restore(0)
-        self._schedule_action_restore(900)
 
         self._ensure_initialized()
 
     def unload(self) -> None:
         if self._controller is not None:
-            if not self._controller.prompt_save_tracks_before_shutdown(self.iface.mainWindow()):
-                return
+            # Best-effort save prompt — never block unload
+            try:
+                self._controller.prompt_save_tracks_before_shutdown(self.iface.mainWindow())
+            except Exception:
+                pass
 
         self._disconnect_ui_lifecycle_signals()
         self._disconnect_project_lifecycle_signals()
@@ -85,7 +98,9 @@ class QgisUdpNavPlugin:
 
     def _ensure_initialized(self) -> None:
         if self._controller is None:
+            diag("Creating FeedController")
             self._controller = FeedController(self.iface)
+            diag(f"Controller created. Feeds: {len(self._controller.feeds())}")
             self._connect_project_lifecycle_signals()
             self._begin_initial_project_transition_guard()
 
@@ -125,17 +140,26 @@ class QgisUdpNavPlugin:
 
     def _auto_start_initial_feed(self) -> None:
         if self._controller is None or not self._pending_initial_autostart:
+            diag("_auto_start_initial_feed: controller=None or no pending autostart")
             return
 
         if self._controller.project_transition_active():
+            diag("_auto_start_initial_feed: project_transition_active, retrying in 500ms")
             QTimer.singleShot(500, self._auto_start_initial_feed)
             return
 
         if not self._qgis_ui_ready_for_autostart():
+            diag("_auto_start_initial_feed: UI not ready, retrying in 500ms")
             QTimer.singleShot(500, self._auto_start_initial_feed)
             return
 
         startup_mode = str(self._controller.startup_mode() or "first").strip().lower()
+        diag(f"_auto_start_initial_feed: mode={startup_mode}, feeds={len(self._controller.feeds())}")
+        QgsMessageLog.logMessage(
+            f"[UDP Nav] Autostart: mode={startup_mode}, feeds={len(self._controller.feeds())}",
+            "UDP Nav",
+            Qgis.MessageLevel.Info,
+        )
         if startup_mode == "off":
             self._pending_initial_autostart = False
             return
@@ -146,6 +170,7 @@ class QgisUdpNavPlugin:
 
         feeds = self._controller.feeds()
         if not feeds:
+            self._pending_initial_autostart = False
             return
 
         selected_feed = next((feed for feed in feeds if bool(getattr(feed, "enabled", True))), None)
@@ -211,19 +236,15 @@ class QgisUdpNavPlugin:
         if action.icon().isNull():
             action.setIcon(QIcon(_plugin_icon_path()))
 
-        # Re-register defensively so the button returns if the toolbar rebuilt.
-        self.iface.removePluginMenu("&QGIS UDP Nav", action)
-        self.iface.removeToolBarIcon(action)
-        self.iface.addPluginToMenu("&QGIS UDP Nav", action)
-        self.iface.addToolBarIcon(action)
-
     def _connect_project_lifecycle_signals(self) -> None:
         if self._project_signal_connections:
             return
 
         project = QgsProject.instance()
         self._connect_project_signal(project, "readProject", self._on_project_transition_started)
-        self._connect_project_signal(project, "projectRead", self._on_project_transition_completed)
+        # QGIS 4 removed "projectRead"; use "readProjectWithContext" as completion signal
+        if not self._connect_project_signal(project, "projectRead", self._on_project_transition_completed):
+            self._connect_project_signal(project, "readProjectWithContext", self._on_project_transition_completed)
 
     def _disconnect_project_lifecycle_signals(self) -> None:
         for signal, handler in self._project_signal_connections:
@@ -234,18 +255,19 @@ class QgisUdpNavPlugin:
 
         self._project_signal_connections = []
 
-    def _connect_project_signal(self, project, signal_name: str, handler) -> None:
+    def _connect_project_signal(self, project, signal_name: str, handler) -> bool:
         signal = getattr(project, signal_name, None)
         connect = getattr(signal, "connect", None)
         if not callable(connect):
-            return
+            return False
 
         try:
             connect(handler)
         except TypeError:
-            return
+            return False
 
         self._project_signal_connections.append((signal, handler))
+        return True
 
     def _begin_initial_project_transition_guard(self) -> None:
         if self._controller is None:
@@ -269,6 +291,9 @@ class QgisUdpNavPlugin:
 
     def _on_project_transition_started(self, *_args) -> None:
         if self._controller is None:
+            return
+        # Ignore project signals during initial startup guard
+        if self._initial_project_transition_pending:
             return
 
         self._controller.project_transition_started()
