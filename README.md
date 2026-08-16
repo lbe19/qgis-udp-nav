@@ -4,7 +4,7 @@ QGIS UDP Nav is ~~slopware~~ *an agentically developed* QGIS plugin for receivin
 
 Developed using Github Copilot by a non-programmer - use at your own risk.
 
-Currently the plugin supports standard NMEA 0183 and Kongsberg HiPAP sentences. The plugin only targets UDP data streams, as QGIS natively supports receiving GPS signals via serial, and most survey vessels will offer a UDP stream over a physical serial cable for HiPAP signals anyway.
+Currently the plugin supports standard NMEA 0183 and Kongsberg HiPAP sentences. The plugin only targets UDP data streams, as QGIS natively supports receiving GPS signals via serial, and you will most likely be using a UDP stream over a physical serial cable for HiPAP signals anyway.
 
 The plugin includes split vessel/vehicle routing, keep-center map tracking, live telemetry cards (work in progress, might be annoying to use), track recording (x/y and x/y/z, with averaged-out smoothing for a more relevant track distance), and persistent saved-track export with operator metadata.
 
