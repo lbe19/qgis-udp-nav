@@ -12,7 +12,13 @@ from qgis.PyQt.QtWidgets import QAction, QApplication
 from qgis.core import Qgis, QgsMessageLog, QgsProject
 
 from .controller import FeedController
-from .diag import DIAG_LOG_PATH, diag
+from .diag import (
+    DIAG_LOG_PATH,
+    diag,
+    diagnostic_logging_enabled,
+    set_diagnostic_logging_enabled,
+)
+from .settings import SettingsStore
 from .ui import FeedDockWidget
 
 
@@ -40,12 +46,19 @@ class QgisUdpNavPlugin:
         self._project_transition_watchdog_token = 0
 
     def initGui(self) -> None:
-        # Clear diagnostic log on startup
-        try:
-            with open(DIAG_LOG_PATH, "w", encoding="utf-8") as f:
-                f.write(f"=== UDP Nav Plugin Startup {datetime.now(timezone.utc).isoformat()} ===\n")
-        except Exception:
-            pass
+        set_diagnostic_logging_enabled(
+            diagnostic_logging_enabled()
+            or SettingsStore().load_diagnostic_logging()
+        )
+        if diagnostic_logging_enabled():
+            try:
+                with open(DIAG_LOG_PATH, "w", encoding="utf-8") as f:
+                    f.write(
+                        "=== UDP Nav Plugin Startup "
+                        f"{datetime.now(timezone.utc).isoformat()} ===\n"
+                    )
+            except OSError:
+                pass
         diag("initGui called")
 
         self._action = QAction(QIcon(_plugin_icon_path()), "QGIS UDP Nav", self.iface.mainWindow())
@@ -61,11 +74,14 @@ class QgisUdpNavPlugin:
 
     def unload(self) -> None:
         if self._controller is not None:
-            # Best-effort save prompt — never block unload
             try:
                 self._controller.prompt_save_tracks_before_shutdown(self.iface.mainWindow())
-            except Exception:
-                pass
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f"[UDP Nav] Save-tracks prompt failed: {exc!r}\n{traceback.format_exc()}",
+                    "UDP Nav",
+                    Qgis.MessageLevel.Critical,
+                )
 
         self._disconnect_ui_lifecycle_signals()
         self._disconnect_project_lifecycle_signals()
@@ -121,6 +137,7 @@ class QgisUdpNavPlugin:
         self._dock.start_all_requested.connect(self._controller.start_all)
         self._dock.stop_all_requested.connect(self._controller.stop_all)
         self._dock.startup_mode_changed.connect(self._controller.set_startup_mode)
+        self._dock.sentence_logging_changed.connect(self._on_sentence_logging_changed)
         self._dock.color_changed.connect(self._controller.set_feed_color)
         self._dock.symbol_changed.connect(self._controller.set_feed_symbol)
         self._dock.vessel_profiles_updated.connect(self._controller.set_vessel_profiles)
@@ -133,6 +150,9 @@ class QgisUdpNavPlugin:
         self._dock.set_rows(self._controller.snapshot_rows())
         self._dock.set_vessel_profiles(self._controller.vessel_profiles())
         self._dock.set_startup_mode(self._controller.startup_mode())
+        self._dock.set_sentence_logging_enabled(
+            self._controller.sentence_logging_enabled()
+        )
         self._pending_initial_autostart = True
         QTimer.singleShot(250, self._auto_start_initial_feed)
 
@@ -242,9 +262,13 @@ class QgisUdpNavPlugin:
 
         project = QgsProject.instance()
         self._connect_project_signal(project, "readProject", self._on_project_transition_started)
-        # QGIS 4 removed "projectRead"; use "readProjectWithContext" as completion signal
-        if not self._connect_project_signal(project, "projectRead", self._on_project_transition_completed):
-            self._connect_project_signal(project, "readProjectWithContext", self._on_project_transition_completed)
+        self._connect_project_signal(project, "cleared", self._on_project_transition_started)
+        self._connect_project_signal(self.iface, "projectRead", self._on_project_transition_completed)
+        self._connect_project_signal(
+            self.iface,
+            "newProjectCreated",
+            self._on_project_transition_completed,
+        )
 
     def _disconnect_project_lifecycle_signals(self) -> None:
         for signal, handler in self._project_signal_connections:
@@ -335,3 +359,15 @@ class QgisUdpNavPlugin:
                 return False
 
         return True
+
+    def _on_sentence_logging_changed(self, enabled: bool) -> None:
+        if self._controller is None or self._dock is None:
+            return
+
+        self._controller.set_sentence_logging_enabled(
+            bool(enabled),
+            self.iface.mainWindow(),
+        )
+        self._dock.set_sentence_logging_enabled(
+            self._controller.sentence_logging_enabled()
+        )

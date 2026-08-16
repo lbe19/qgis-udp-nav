@@ -1,6 +1,6 @@
 # QGIS UDP Nav: Current State (0.2.0)
 
-This document describes the plugin behavior as implemented in this repository at tag 0.2.0.
+This document describes the plugin behavior implemented in this repository at version 0.2.0.
 It is intentionally implementation-focused and mirrors the current code paths.
 
 ## 1. Purpose and Scope
@@ -21,8 +21,12 @@ The plugin currently focuses on operational display and recording workflows, not
 - Plugin package folder: qgis_udp_nav_plugin/
 - Entry point: qgis_udp_nav_plugin/__init__.py (classFactory)
 - Main plugin class: qgis_udp_nav_plugin/plugin.py
-- Metadata compatibility range: QGIS 4.0 to 4.99
+- Metadata compatibility range: QGIS 3.44 to 4.99
+- Tested runtimes: QGIS 3.44.12 / Qt 5.15.13 and QGIS 4.2.0 / Qt 6.11.0
 - Project Python requirement: >= 3.10
+
+The explicit 4.99 maximum is retained because omitting it for a plugin with a QGIS 3 minimum
+would make the repository infer a 3.99 maximum. QGIS 3.44 is the tested QGIS 3 floor.
 
 ## 3. Installation and Local Deployment (GitHub Workflow)
 
@@ -38,10 +42,14 @@ cd qgis-udp-nav
 ### 3.2 Deploy into local QGIS profile (Windows)
 
 ```powershell
-$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+$profile = 'C:\path\to\the\active\QGIS\profile'
+$target = Join-Path $profile 'python\plugins\qgis_udp_nav_plugin'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
 Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
 ```
+
+Use `Settings > User Profiles > Open Active Profile Folder` to find `$profile`. Append
+`python/plugins` rather than assuming a QGIS version or the `default` profile.
 
 ### 3.3 Run in QGIS
 
@@ -80,6 +88,7 @@ Split feeds render as one main row plus sub-rows:
 - Save Tracks
 - Track Vessel (toggle)
 - Track Vehicle (toggle, split feeds)
+- Log received sentences to disk (toggle with a disk/performance warning)
 
 ### 4.3 Startup mode
 
@@ -120,6 +129,7 @@ Track role selection is remembered per base feed while navigating the table.
 ### 4.6 Sentence inspector
 
 - Live sentence stream by selected feed
+- Visible throttling markers when the display rate exceeds 50 sentences/second
 - Stop/Start control for selected feed
 - No Scroll mode (sentence-type snapshot view)
 - Clear output
@@ -239,8 +249,12 @@ Track collection is managed by controller/feed_controller.py and map/layer_manag
 Behavior:
 
 - Enabling a track toggle starts collecting points for that role.
-- Disabling a track toggle auto-saves that role track (if at least two points exist), then clears the active track.
-- Saved-layer refresh after toggle-off is deferred to avoid UI lag.
+- Disabling a track toggle pauses collection and retains that role track in memory.
+- Save Tracks appends the current accumulated route as a new saved feature.
+- A successful save marks only the exported revision as saved. A later accepted point makes the
+  retained route unsaved again.
+- Plugin unload/exit offers Save or Discard for unsaved routes. Save failures offer retry or
+  explicit discard because QGIS plugin unload has no reliable cancel contract.
 
 Main row track dimension reporting:
 
@@ -253,7 +267,7 @@ Main row track dimension reporting:
 Save Tracks writes to a persistent GeoJSON-backed layer:
 
 - Layer name: UDP Nav - Saved Tracks
-- File: %APPDATA%/QGIS/QGIS4/profiles/default/qgis_udp_nav_tracks/saved_tracks.geojson
+- File: `<active QGIS profile>/qgis_udp_nav_tracks/saved_tracks.geojson`
 
 Each saved feature contains:
 
@@ -299,12 +313,14 @@ Stored by SettingsStore under prefix qgis_udp_nav_plugin:
 - qgis_udp_nav_plugin/feeds
 - qgis_udp_nav_plugin/vessel_profiles
 - qgis_udp_nav_plugin/startup_mode
+- qgis_udp_nav_plugin/sentence_logging
+- qgis_udp_nav_plugin/diagnostic_logging
 
 ### 10.2 Runtime logs
 
-Per-feed/subfeed logs are appended under:
+When `Log received sentences to disk` is enabled, per-feed/subfeed logs are appended under:
 
-- %APPDATA%/QGIS/QGIS4/profiles/default/qgis_udp_nav_logs
+- `<active QGIS profile>/qgis_udp_nav_logs`
 
 File naming pattern:
 
@@ -378,4 +394,6 @@ Useful options:
 - Most logic is validated through deterministic tests outside full QGIS runtime.
 - Full GUI behavior still depends on running inside QGIS desktop.
 - Local test execution may require fallback behavior when qgis Python module is unavailable.
-- Metadata and repository publication rules are intentionally out of scope for this document version.
+- PSIMSSB Cartesian/polar fallback offsets currently use the latest GNSS fix as their local
+  origin. Changing that origin to hull center, transducer, or another vessel reference is
+  intentionally deferred pending domain sign-off; absolute UTM PSIMSSB positions are unaffected.

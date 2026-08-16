@@ -61,7 +61,7 @@ def _messagebox_yes_code() -> int:
     enum_cls = getattr(QMessageBox, "StandardButton", None)
     if enum_cls is not None and hasattr(enum_cls, "Yes"):
         return int(enum_cls.Yes)
-    return int(QMessageBox.Yes)
+    return int(getattr(QMessageBox, "Yes"))
 
 
 def _select_rows_behavior():
@@ -1121,6 +1121,7 @@ class FeedDockWidget(QDockWidget):
     save_tracks_requested = pyqtSignal(str, str, str)
     track_toggle_requested = pyqtSignal(str, str, bool)
     startup_mode_changed = pyqtSignal(str)
+    sentence_logging_changed = pyqtSignal(bool)
     color_changed = pyqtSignal(str, str, str)
     symbol_changed = pyqtSignal(str, dict)
     vessel_profiles_updated = pyqtSignal(dict)
@@ -1169,6 +1170,10 @@ class FeedDockWidget(QDockWidget):
         self._startup_mode_combo.addItem("Auto Start: All", "all")
         self._startup_mode_combo.setToolTip(
             "Configure what the plugin starts automatically on launch."
+        )
+        self._sentence_logging_check = QCheckBox("Log received sentences to disk")
+        self._sentence_logging_check.setToolTip(
+            "Write every received UDP sentence to per-feed diagnostic log files."
         )
         self._keep_vessel_center_button = QPushButton("Keep Vessel Center")
         self._keep_vessel_center_button.setCheckable(True)
@@ -1230,6 +1235,7 @@ class FeedDockWidget(QDockWidget):
         button_grid.addWidget(self._track_vehicle_button, 5, 1)
         button_grid.addWidget(self._save_tracks_button, 5, 2)
         button_grid.addWidget(self._startup_mode_combo, 6, 0, 1, 3)
+        button_grid.addWidget(self._sentence_logging_check, 7, 0, 1, 3)
 
         self._table = QTableWidget(0, 9)
         self._table.setHorizontalHeaderLabels(
@@ -1370,6 +1376,7 @@ class FeedDockWidget(QDockWidget):
         self._startup_mode_combo.currentIndexChanged.connect(
             self._on_startup_mode_changed
         )
+        self._sentence_logging_check.toggled.connect(self.sentence_logging_changed)
         self._pause_debug_button.toggled.connect(self._on_pause_toggled)
         self._no_scroll_button.toggled.connect(self._on_no_scroll_toggled)
         self._clear_debug_button.clicked.connect(self._on_clear_debug_clicked)
@@ -1385,6 +1392,11 @@ class FeedDockWidget(QDockWidget):
         blocker = self._startup_mode_combo.blockSignals(True)
         self._startup_mode_combo.setCurrentIndex(max(0, index))
         self._startup_mode_combo.blockSignals(blocker)
+
+    def set_sentence_logging_enabled(self, enabled: bool) -> None:
+        blocker = self._sentence_logging_check.blockSignals(True)
+        self._sentence_logging_check.setChecked(bool(enabled))
+        self._sentence_logging_check.blockSignals(blocker)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)

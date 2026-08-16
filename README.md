@@ -24,16 +24,18 @@ PowerShell example:
 ```powershell
 git clone https://github.com/lbert1858/qgis-udp-nav.git
 cd qgis-udp-nav
-$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+$profile = 'C:\path\to\the\active\QGIS\profile'
+$target = Join-Path $profile 'python\plugins\qgis_udp_nav_plugin'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
 Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
 ```
 
 ### Plugin Folder Location By OS
 
-- Windows: `%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin`
-- Linux: `~/.local/share/QGIS/QGIS4/profiles/default/python/plugins/qgis_udp_nav_plugin`
-- macOS: `~/Library/Application Support/QGIS/QGIS4/profiles/default/python/plugins/qgis_udp_nav_plugin`
+Use `Settings > User Profiles > Open Active Profile Folder` in QGIS, then append
+`python/plugins/qgis_udp_nav_plugin`. The profile root is version- and profile-specific; for
+example, Windows commonly uses `%APPDATA%\QGIS\QGIS3\profiles\<profile>` for QGIS 3 and
+`%APPDATA%\QGIS\QGIS4\profiles\<profile>` for QGIS 4.
 
 ### Update To New Version
 
@@ -41,7 +43,8 @@ From your local clone:
 
 ```powershell
 git pull
-$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+$profile = 'C:\path\to\the\active\QGIS\profile'
+$target = Join-Path $profile 'python\plugins\qgis_udp_nav_plugin'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
 Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
 ```
@@ -62,7 +65,8 @@ Delete the plugin folder from your QGIS profile plugins directory, then restart 
 
 - Plugin name: QGIS UDP Nav
 - Plugin version: 0.2.0
-- QGIS compatibility: 4.0 to 4.99
+- QGIS compatibility: 3.44 to 4.99
+- Tested runtimes: QGIS 3.44.12 / Qt 5.15.13 and QGIS 4.2.0 / Qt 6.11.0
 - Python requirement in project metadata: >= 3.10
 
 ## Feature Overview
@@ -121,6 +125,7 @@ Delete the plugin folder from your QGIS profile plugins directory, then restart 
 ### Telemetry and Operator UI
 
 - Feed Sentence Inspector with live sentence stream.
+- Optional `Log received sentences to disk` control, with a warning before enabling.
 - No Scroll mode for field-wise sentence snapshot view (enabled by default on startup).
 - Startup mode selector in dock: Off / First / All auto-start behavior.
 - Group Sources selection menu stays open while toggling checkboxes.
@@ -153,7 +158,11 @@ Delete the plugin folder from your QGIS profile plugins directory, then restart 
 
 - Save Tracks button exports current active tracks into one persistent saved layer.
 - For split feeds, vessel and vehicle are saved as separate features in the same layer.
-- On plugin unload/exit, unsaved in-memory tracks trigger a Save/Discard/Cancel prompt.
+- A successful save retains the accumulated in-memory route and marks that exact snapshot saved.
+  New accepted points make the route unsaved again; each later save appends the current full route
+  as another feature.
+- On plugin unload/exit, unsaved in-memory tracks trigger a Save/Discard prompt. QGIS plugin
+  unload cannot be reliably canceled, so a failed save offers retry or explicit discard.
 - Prompted metadata on save:
   - planned number
   - actual number
@@ -188,18 +197,15 @@ These runtime layers are marked as plugin-ephemeral so QGIS does not repeatedly 
 
 - Layer name: UDP Nav - Saved Tracks
 - Backing file: GeoJSON
-- Default location on Windows:
-
-  - %APPDATA%/QGIS/QGIS4/profiles/default/qgis_udp_nav_tracks/saved_tracks.geojson
+- Default location: `<active QGIS profile>/qgis_udp_nav_tracks/saved_tracks.geojson`
 
 - Appends new features on each save operation.
 
 ### Other Persistent Data
 
 - Feed and profile configuration is stored via QGIS settings.
-- Runtime logs are stored per feed/subfeed under:
-
-  - %APPDATA%/QGIS/QGIS4/profiles/default/qgis_udp_nav_logs
+- When sentence logging is enabled, per-feed/subfeed logs are stored under
+  `<active QGIS profile>/qgis_udp_nav_logs`.
 
 ## Dock Workflow
 
@@ -306,7 +312,8 @@ Notes:
 Example copy-deploy command:
 
 ```powershell
-$target = Join-Path $env:APPDATA 'QGIS\QGIS4\profiles\default\python\plugins\qgis_udp_nav_plugin'
+$profile = 'C:\path\to\the\active\QGIS\profile'
+$target = Join-Path $profile 'python\plugins\qgis_udp_nav_plugin'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $target
 Copy-Item -Recurse -Force '.\qgis_udp_nav_plugin' $target
 ```

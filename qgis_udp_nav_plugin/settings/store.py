@@ -6,7 +6,15 @@ from typing import Dict, List
 try:
     from qgis.core import QgsSettings
 except ImportError:  # pragma: no cover - fallback for local non-QGIS test runs.
-    from PyQt5.QtCore import QSettings as QgsSettings  # type: ignore
+    try:
+        from PyQt6.QtCore import QSettings as QgsSettings  # type: ignore
+    except ImportError:
+        try:
+            from PyQt5.QtCore import QSettings as QgsSettings  # type: ignore
+        except ImportError:
+            class QgsSettings:  # type: ignore[no-redef]
+                def __init__(self) -> None:
+                    raise RuntimeError("QGIS, PyQt6, or PyQt5 is required")
 
 from ..model.feed_config import FeedConfig
 

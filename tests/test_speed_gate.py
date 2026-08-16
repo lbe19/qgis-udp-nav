@@ -39,8 +39,13 @@ class TestSpeedGate:
         lm = LayerManager()
         feed = _feed(3.0)
         lm._passes_speed_gate(feed, 60.0, 5.0)
-        # 0.0001 deg lat ~ 11m. With dt ~ 0.01s that is 1100 m/s -- reject
-        time.sleep(0.01)
+        # 0.0001 deg lat is ~11m. Pin elapsed time because Windows timer
+        # resolution can report no monotonic advance after a 10ms sleep.
+        lm._track_last_accepted["test-vehicle"] = (
+            60.0,
+            5.0,
+            time.monotonic() - 0.1,
+        )
         assert lm._passes_speed_gate(feed, 60.0001, 5.0) is False
 
     def test_slow_movement_accepted(self):
