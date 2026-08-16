@@ -12,6 +12,7 @@ from qgis.PyQt.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, pyqtSign
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsMessageLog,
@@ -45,7 +46,7 @@ _KEEP_CENTER_MODES = {"vessel", "vehicle", "group"}
 _GROUP_DEFAULT_MAX_AGE_SEC = 15
 _LIVE_SNAPSHOT_MIN_INTERVAL_SEC = 0.2
 _SHUTDOWN_WORKER_WAIT_MS = 2500
-_SENTENCE_STREAM_RATE_LIMIT = 50  # sentences/sec above which UI streaming is skipped
+_SENTENCE_STREAM_RATE_LIMIT = 50
 
 
 def _queued_connection_type():
@@ -53,6 +54,27 @@ def _queued_connection_type():
     if connection_enum is not None and hasattr(connection_enum, "QueuedConnection"):
         return connection_enum.QueuedConnection
     return Qt.QueuedConnection
+
+
+def _messagebox_icon(name: str):
+    enum_cls = getattr(QMessageBox, "Icon", None)
+    if enum_cls is not None and hasattr(enum_cls, name):
+        return getattr(enum_cls, name)
+    return getattr(QMessageBox, name)
+
+
+def _messagebox_button(name: str):
+    enum_cls = getattr(QMessageBox, "StandardButton", None)
+    if enum_cls is not None and hasattr(enum_cls, name):
+        return getattr(enum_cls, name)
+    return getattr(QMessageBox, name)
+
+
+def _messagebox_exec(dialog: QMessageBox) -> int:
+    exec_fn = getattr(dialog, "exec", None)
+    if callable(exec_fn):
+        return int(exec_fn())
+    return int(dialog.exec_())
 
 
 class FeedController(QObject):
@@ -140,13 +162,13 @@ class FeedController(QObject):
 
         if self._project_transition_active:
             self._layer_manager.reset_project_layer_caches()
-            self._last_position_by_layer.clear()
+            self._clear_project_runtime_state()
             return
 
         self._project_transition_active = True
         self._project_transition_resume_feed_ids = list(self._workers.keys())
         self._layer_manager.reset_project_layer_caches()
-        self._last_position_by_layer.clear()
+        self._clear_project_runtime_state()
 
         if self._project_transition_resume_feed_ids:
             self.stop_all(force=True)
@@ -161,7 +183,8 @@ class FeedController(QObject):
         # Reset position counter so canvas refresh fires for new layers
         self._position_count = 0
         self._layer_manager.reset_project_layer_caches()
-        self._last_position_by_layer.clear()
+        self._clear_project_runtime_state()
+        self._layer_manager.refresh_saved_tracks_layer(add_if_missing=False)
 
         resume_ids = [
             feed_id
@@ -174,6 +197,14 @@ class FeedController(QObject):
             self.start_feed(feed_id)
 
         self._emit_snapshot()
+
+    def _clear_project_runtime_state(self) -> None:
+        self._latest_heading.clear()
+        self._reference_heading_by_layer.clear()
+        self._telemetry_by_layer.clear()
+        self._last_position_by_layer.clear()
+        self._last_vehicle_fix_by_feed.clear()
+        self._vehicle_fallback_active_by_feed.clear()
 
     def set_vessel_profiles(self, profiles: dict) -> None:
         safe_profiles: Dict[str, dict] = {}
@@ -426,7 +457,7 @@ class FeedController(QObject):
             if feed.split_subfeeds_enabled:
                 for role in ("vessel", "vehicle"):
                     track_layer_id = self._subfeed_layer_id(base_feed_id, role)
-                    track = self._layer_manager.track_snapshot(track_layer_id)
+                    track = self._layer_manager.unsaved_track_snapshot(track_layer_id)
                     if track is None:
                         continue
 
@@ -442,7 +473,7 @@ class FeedController(QObject):
                     )
                 continue
 
-            track = self._layer_manager.track_snapshot(base_feed_id)
+            track = self._layer_manager.unsaved_track_snapshot(base_feed_id)
             if track is None:
                 continue
 
@@ -483,6 +514,8 @@ class FeedController(QObject):
             self._on_worker_status(base_feed_id, "error", "Failed to save tracks")
             return
 
+        self._mark_track_entries_saved(entries)
+
         output_name = os.path.basename(file_path) if file_path else "saved_tracks.geojson"
         self._on_worker_status(
             base_feed_id,
@@ -501,34 +534,39 @@ class FeedController(QObject):
         track_count = len(entries)
         feed_count = len({str(entry.get("feed_id") or "").strip() for entry in entries})
 
-        dialog = QMessageBox(parent)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("QGIS UDP Nav")
-        dialog.setText("Unsaved track data was found.")
-        dialog.setInformativeText(
-            f"Save {track_count} track(s) from {feed_count} feed(s) before closing?"
-        )
-        dialog.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
-        dialog.setDefaultButton(QMessageBox.Save)
+        save_button = _messagebox_button("Save")
+        discard_button = _messagebox_button("Discard")
 
-        selected = dialog.exec()
-        if selected == QMessageBox.Cancel:
-            return False
-        if selected == QMessageBox.Discard:
-            return True
+        while True:
+            dialog = QMessageBox(parent)
+            dialog.setIcon(_messagebox_icon("Warning"))
+            dialog.setWindowTitle("QGIS UDP Nav")
+            dialog.setText("Unsaved track data was found.")
+            dialog.setInformativeText(
+                f"Save {track_count} track(s) from {feed_count} feed(s) before closing?"
+            )
+            dialog.setStandardButtons(save_button | discard_button)
+            dialog.setDefaultButton(save_button)
 
-        saved_count, file_path = self._layer_manager.save_tracks(
-            entries,
-            planned_number="",
-            actual_number="",
-        )
-        if saved_count <= 0:
+            if _messagebox_exec(dialog) == int(discard_button):
+                return True
+
+            saved_count, file_path = self._layer_manager.save_tracks(
+                entries,
+                planned_number="",
+                actual_number="",
+                refresh_saved_layer=False,
+            )
+            if saved_count == len(entries):
+                break
+
             QMessageBox.warning(
                 parent,
                 "QGIS UDP Nav",
-                "Failed to save tracks. Close was canceled to avoid data loss.",
+                "Tracks could not be saved. Choose Save to retry or Discard to continue.",
             )
-            return False
+
+        self._mark_track_entries_saved(entries)
 
         output_name = os.path.basename(file_path) if file_path else "saved_tracks.geojson"
         first_feed_id = str(entries[0].get("feed_id") or "").strip()
@@ -539,6 +577,17 @@ class FeedController(QObject):
                 f"Saved {saved_count} track(s) to UDP Nav - Saved Tracks ({output_name})",
             )
         return True
+
+    def _mark_track_entries_saved(self, entries: List[dict]) -> None:
+        for entry in entries:
+            track_layer_id = str(entry.get("track_layer_id") or "").strip()
+            track = entry.get("track")
+            if not track_layer_id or not isinstance(track, dict):
+                continue
+            self._layer_manager.mark_track_saved(
+                track_layer_id,
+                int(track.get("revision") or 0),
+            )
 
     def set_track_enabled(self, feed_id: str, role: str, enabled: bool) -> None:
         base_feed_id = str(feed_id or "").strip()
@@ -680,18 +729,9 @@ class FeedController(QObject):
         for thread in threads.values():
             thread.requestInterruption()
 
-        # During shutdown, invoke stop directly on each worker (bypasses queued
-        # connection which may never be delivered if the worker event loop is busy)
-        if self._shutting_down:
-            for worker in workers.values():
-                try:
-                    worker.stop()
-                except Exception:
-                    pass
-        else:
-            connection_type = _queued_connection_type()
-            for worker in workers.values():
-                QMetaObject.invokeMethod(worker, "stop", connection_type)
+        connection_type = _queued_connection_type()
+        for worker in workers.values():
+            QMetaObject.invokeMethod(worker, "stop", connection_type)
 
         for thread in threads.values():
             thread.quit()
@@ -781,6 +821,7 @@ class FeedController(QObject):
         self._flush_log_buffer()
         self._layer_manager.clear()
         self._latest_heading.clear()
+        self._reference_heading_by_layer.clear()
         self._telemetry_by_layer.clear()
         self._last_position_by_layer.clear()
         self._last_vehicle_fix_by_feed.clear()
@@ -804,7 +845,7 @@ class FeedController(QObject):
 
         if enabled:
             dialog = QMessageBox(parent)
-            dialog.setIcon(QMessageBox.Warning)
+            dialog.setIcon(_messagebox_icon("Warning"))
             dialog.setWindowTitle("Enable Sentence Logging")
             dialog.setText("This will log every received UDP sentence to disk.")
             dialog.setInformativeText(
@@ -812,9 +853,11 @@ class FeedController(QObject):
                 "megabytes per day and will degrade performance over time.\n\n"
                 "Only enable this for short diagnostic sessions."
             )
-            dialog.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-            dialog.setDefaultButton(QMessageBox.Cancel)
-            if dialog.exec() != QMessageBox.Ok:
+            ok_button = _messagebox_button("Ok")
+            cancel_button = _messagebox_button("Cancel")
+            dialog.setStandardButtons(ok_button | cancel_button)
+            dialog.setDefaultButton(cancel_button)
+            if _messagebox_exec(dialog) != int(ok_button):
                 return False
 
             self._sentence_logging_enabled = True
@@ -838,15 +881,9 @@ class FeedController(QObject):
         self._settings.save_feeds(self.feeds())
 
     def _initialize_log_dir(self) -> str:
-        appdata = os.getenv("APPDATA", "").strip()
-        if appdata:
-            profile_root = os.path.join(
-                appdata,
-                "QGIS",
-                "QGIS4",
-                "profiles",
-                "default",
-            )
+        profile_root = str(QgsApplication.qgisSettingsDirPath() or "").strip()
+        if profile_root:
+            profile_root = os.path.normpath(profile_root)
             log_dir = os.path.join(profile_root, "qgis_udp_nav_logs")
             legacy_log_dir = os.path.join(
                 profile_root,
@@ -1120,7 +1157,6 @@ class FeedController(QObject):
             self._handle_position_event(event)
 
     @pyqtSlot(str, str, str)
-    @pyqtSlot(str, str, str)
     def _on_worker_sentence(self, feed_id: str, source_address: str, sentence: str) -> None:
         if self._shutting_down or self._project_transition_active:
             return
@@ -1132,14 +1168,21 @@ class FeedController(QObject):
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
         source = source_address or "-"
         line = f"{stamp}Z [{source}] {sentence}"
-        # Rate-limit sentence streaming to UI — skip if over threshold
+        # Keep the inspector responsive while making throttling visible to operators.
         self._sentence_counter += 1
         now_mono = time.monotonic()
         if (now_mono - self._sentence_rate_window_start) >= 1.0:
             self._sentence_rate = self._sentence_counter
             self._sentence_counter = 0
             self._sentence_rate_window_start = now_mono
-        if self._sentence_rate <= _SENTENCE_STREAM_RATE_LIMIT:
+            if self._sentence_rate > _SENTENCE_STREAM_RATE_LIMIT:
+                self.sentence_streamed.emit(
+                    feed_id,
+                    f"{stamp}Z [UDP Nav] [throttled: {self._sentence_rate} "
+                    f"sentences/sec, display limited to "
+                    f"{_SENTENCE_STREAM_RATE_LIMIT}/sec]",
+                )
+        if self._sentence_counter <= _SENTENCE_STREAM_RATE_LIMIT:
             self.sentence_streamed.emit(feed_id, line)
         if self._sentence_logging_enabled:
             self._append_log_line(feed_id, "SENTENCE", line)
@@ -1231,9 +1274,13 @@ class FeedController(QObject):
 
             self._position_count += 1
             if self._position_count <= 3:
-                print(f"[UDP Nav] Rendering position #{self._position_count}: "
-                      f"lat={event.latitude:.6f} lon={event.longitude:.6f} "
-                      f"feed={render_feed.feed_id} mode={render_feed.symbol_mode}")
+                QgsMessageLog.logMessage(
+                    f"[UDP Nav] Rendering position #{self._position_count}: "
+                    f"lat={event.latitude:.6f} lon={event.longitude:.6f} "
+                    f"feed={render_feed.feed_id} mode={render_feed.symbol_mode}",
+                    "UDP Nav",
+                    Qgis.MessageLevel.Info,
+                )
 
             self._layer_manager.upsert_position(
                 render_feed,

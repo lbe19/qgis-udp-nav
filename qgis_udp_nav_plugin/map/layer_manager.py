@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
+    QgsApplication,
     QgsFeature,
     QgsFillSymbol,
     QgsField,
@@ -66,6 +67,8 @@ class LayerManager:
         self._track_layers: Dict[str, QgsVectorLayer] = {}
         self._track_points: Dict[str, deque] = {}
         self._track_lengths: Dict[str, Tuple[float, float]] = {}
+        self._track_revisions: Dict[str, int] = {}
+        self._saved_track_revisions: Dict[str, int] = {}
         self._track_dimensions: Dict[str, str] = {}
         self._track_last_depth: Dict[str, float] = {}
         # Incremental track length state (Phase 1)
@@ -351,6 +354,7 @@ class LayerManager:
 
         return {
             "feed_id": str(feed_id),
+            "revision": int(self._track_revisions.get(feed_id, 0)),
             "raw_m": float(lengths[0]),
             "smoothed_m": float(lengths[1]),
             "dimension": self._track_dimensions.get(feed_id, "2d"),
@@ -361,12 +365,30 @@ class LayerManager:
             ],
         }
 
+    def unsaved_track_snapshot(self, feed_id: str) -> Optional[dict]:
+        snapshot = self.track_snapshot(feed_id)
+        if snapshot is None:
+            return None
+
+        revision = int(snapshot.get("revision") or 0)
+        if revision <= int(self._saved_track_revisions.get(feed_id, 0)):
+            return None
+        return snapshot
+
+    def mark_track_saved(self, feed_id: str, revision: int) -> None:
+        saved_revision = max(0, int(revision))
+        current_saved_revision = int(self._saved_track_revisions.get(feed_id, 0))
+        if saved_revision > current_saved_revision:
+            self._saved_track_revisions[feed_id] = saved_revision
+
     def detach_track_snapshot(self, feed_id: str) -> Optional[dict]:
         layer = self._cached_layer(self._track_layers, feed_id)
         self._track_layers.pop(feed_id, None)
 
         points = self._track_points.pop(feed_id, None)
         lengths = self._track_lengths.pop(feed_id, None)
+        self._track_revisions.pop(feed_id, None)
+        self._saved_track_revisions.pop(feed_id, None)
         dimension = self._track_dimensions.pop(feed_id, None)
         self._track_last_depth.pop(feed_id, None)
         self._track_origin.pop(feed_id, None)
@@ -568,14 +590,10 @@ class LayerManager:
         if self._saved_tracks_file_path:
             return self._saved_tracks_file_path
 
-        appdata = os.getenv("APPDATA", "").strip()
-        if appdata:
+        profile_root = str(QgsApplication.qgisSettingsDirPath() or "").strip()
+        if profile_root:
             output_dir = os.path.join(
-                appdata,
-                "QGIS",
-                "QGIS4",
-                "profiles",
-                "default",
+                os.path.normpath(profile_root),
                 "qgis_udp_nav_tracks",
             )
         else:
@@ -630,7 +648,11 @@ class LayerManager:
             return False
         return True
 
-    def _ensure_saved_tracks_layer(self, file_path: str) -> None:
+    def _ensure_saved_tracks_layer(
+        self,
+        file_path: str,
+        add_if_missing: bool = True,
+    ) -> None:
         existing = self._saved_tracks_layer
         if not self._is_layer_alive(existing):
             self._saved_tracks_layer = None
@@ -670,6 +692,9 @@ class LayerManager:
                 layer.triggerRepaint()
                 return
 
+        if not add_if_missing:
+            return
+
         layer = QgsVectorLayer(file_path, _SAVED_TRACK_LAYER_NAME, "ogr")
         if not layer.isValid():
             return
@@ -679,12 +704,15 @@ class LayerManager:
         self._saved_tracks_layer = layer
         self._style_saved_tracks_layer(layer)
 
-    def refresh_saved_tracks_layer(self) -> None:
+    def refresh_saved_tracks_layer(self, add_if_missing: bool = True) -> None:
         file_path = self._saved_tracks_path()
         if not file_path or not os.path.isfile(file_path):
             return
 
-        self._ensure_saved_tracks_layer(file_path)
+        self._ensure_saved_tracks_layer(
+            file_path,
+            add_if_missing=add_if_missing,
+        )
 
     def _style_saved_tracks_layer(self, layer: QgsVectorLayer) -> None:
         renderer = layer.renderer()
@@ -699,6 +727,8 @@ class LayerManager:
         self._track_layers.pop(feed_id, None)
         self._track_points.pop(feed_id, None)
         self._track_lengths.pop(feed_id, None)
+        self._track_revisions.pop(feed_id, None)
+        self._saved_track_revisions.pop(feed_id, None)
         self._track_dimensions.pop(feed_id, None)
         self._track_last_depth.pop(feed_id, None)
         self._track_origin.pop(feed_id, None)
@@ -747,6 +777,8 @@ class LayerManager:
         self._track_layers.clear()
         self._track_points.clear()
         self._track_lengths.clear()
+        self._track_revisions.clear()
+        self._saved_track_revisions.clear()
         self._track_dimensions.clear()
         self._track_last_depth.clear()
         self._track_origin.clear()
@@ -1073,6 +1105,8 @@ class LayerManager:
             self._track_layers[feed.feed_id] = layer
             return layer
 
+        self._remove_project_layers_for_feed(feed.feed_id, _LAYER_KIND_TRACK, expected_name)
+
         layer = QgsVectorLayer(
             "LineString?crs=EPSG:4326",
             expected_name,
@@ -1233,6 +1267,7 @@ class LayerManager:
         # Append new point (deque maxlen handles FIFO trim)
         points.append((float(latitude), float(longitude), depth_m))
         local_xy.append((x_m, y_m, z_m))
+        self._track_revisions[feed_id] = self._track_revisions.get(feed_id, 0) + 1
 
         # Add new segment length to running total
         if len(local_xy) >= 2:
