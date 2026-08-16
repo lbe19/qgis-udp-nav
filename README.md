@@ -1,6 +1,6 @@
 # QGIS UDP Nav
 
-QGIS UDP Nav is ~~slopware~~*an agentically developed* QGIS plugin for receiving multiple concurrent UDP navigation feeds and visualizing vessel and subsea vehicle positions in real time.
+QGIS UDP Nav is ~~slopware~~ *an agentically developed* QGIS plugin for receiving multiple concurrent UDP navigation feeds and visualizing vessel and subsea vehicle positions in real time.
 
 Developed using Github Copilot by a non-programmer - use at your own risk.
 
